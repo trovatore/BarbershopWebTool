@@ -7,7 +7,7 @@ import { analyzeChord, SERIAL as S_THY } from './theory.js';
 import { appState, syncInputsToState, syncStateToInputs, loadStateFromURL, generatePermalink, getNoteString, syncChordToScoreDocument, VOWEL_PRESETS_LEGACY, VOWEL_PRESETS_EAR } from './state.js';
 
 const S_IDX = "#067-STABLE";
-const SHOW_SERIALS = true;
+const SHOW_SERIALS = false;
 
 function getAudioSettings() {
     return {
