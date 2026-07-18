@@ -81,6 +81,10 @@ function updateAnalysisResult(data, chord) {
     
     if (appState.settings.intonation !== 'custom' && data.notes) {
         chord.tuning = data.notes.map(n => n.tuning);
+        // Analysis resolves after triggerMutation()'s own (necessarily pre-analysis) sync call
+        // already ran, so that earlier sync persisted stale tuning -- this is the point where
+        // the real, up-to-date values exist, and the only place that syncs them.
+        syncChordToScoreDocument();
     }
     renderUI();
 }
