@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Barbershop Spectral Analysis</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: system-ui, sans-serif; background: #f8f9fa; margin: 0; padding: 20px; }
+        .container { max-width: 1100px; margin: 0 auto; }
+        .card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-bottom: 20px; }
+        h1 { font-size: 1.5rem; color: #333; margin-top: 0; }
+        .chart-container { position: relative; height: 500px; width: 100%; }
+        .peak-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 15px; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 10px; }
+        th { text-align: left; background: #eee; padding: 8px; }
+        td { padding: 8px; border-bottom: 1px solid #f0f0f0; }
+        .part-Bass { color: #d32f2f; } .part-Bari { color: #f57c00; }
+        .part-Lead { color: #388e3c; } .part-Tenor { color: #1976d2; }
+        .part-Summed { color: #333; font-weight: bold; }
+        @media (max-width: 600px) { .chart-container { height: 350px; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h1>Spectrum Analysis</h1>
+            <div class="chart-container"><canvas id="spectrumChart"></canvas></div>
+        </div>
+        <div id="peakContainer" class="peak-tables"></div>
+    </div>
+
+    <script>
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('../sw.js').then(reg => {
+                    console.log('SW Registered');
+                }).catch(err => console.log('SW Registration failed', err));
+            });
+        }
+    </script>
+
+    <script>
+        const data = JSON.parse(localStorage.getItem('chordAnalysisData'));
+        if (!data) { 
+            document.body.innerHTML = "<div class='container'><h1>No analysis data found.</h1></div>";
+            throw new Error("No data");
+        }
+
+        // --- Helper: Frequency to Semitone ---
+        function freqToSemi(f) { return 12 * Math.log2(f / 440) + 57; }
+        function semiToFreq(s) { return 440 * Math.pow(2, (s - 57) / 12); }
+
+        // --- 1. Stable Vertical Scaling (Multiples of 5dB, Fixed Range) ---
+        const allMagnitudes = data.parts.flatMap(p => p.magnitudes);
+        const globalMax = Math.max(...allMagnitudes);
+        
+        // Snap the top to the next 5dB multiple
+        const yMax = Math.ceil((globalMax + 2) / 5) * 5;
+        // Fixed 95dB depth provides a stable vertical window
+        const yMin = yMax - 95;
+
+        // --- 2. Stable Horizontal Scaling (C-Below-Peak to C8) ---
+        const allPeakFreqs = data.parts.flatMap(p => p.peaks.map(pk => pk.freq));
+        const minPeakFreq = Math.min(...allPeakFreqs);
+        const minPeakSemi = freqToSemi(minPeakFreq);
+        
+        // Find the "C" note immediately below the lowest peak
+        const startSemi = Math.floor(minPeakSemi / 12) * 12;
+        const xAxisMin = semiToFreq(startSemi);
+
+        // Fixed right bound at C8 (MIDI 108)
+        const xAxisMax = semiToFreq(108);
+
+        // --- Custom Tick Generator ---
+        function getNoteName(freq) {
+            const names = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
+            const semis = freqToSemi(freq);
+            const rounded = Math.round(semis);
+            return {
+                name: names[((rounded % 12) + 12) % 12],
+                octave: Math.floor(rounded / 12),
+                semitone: rounded
+            };
+        }
+
+        const ticks = [];
+        const endSemi = 108;
+        for (let n = startSemi; n <= endSemi; n++) {
+            ticks.push(semiToFreq(n));
+        }
+
+        // --- Chart Initialization ---
+        const ctx = document.getElementById('spectrumChart').getContext('2d');
+        const colors = { 'Bass': '#d32f2f', 'Bari': '#f57c00', 'Lead': '#388e3c', 'Tenor': '#1976d2', 'Summed': '#333' };
+
+        new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: data.freqs,
+                datasets: data.parts.map(p => ({
+                    label: p.name,
+                    data: p.magnitudes,
+                    borderColor: colors[p.name],
+                    borderWidth: p.name === 'Summed' ? 2.5 : 1.2,
+                    pointRadius: 0,
+                    fill: false,
+                    tension: 0.1
+                }))
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                scales: {
+                    x: {
+                        type: 'logarithmic',
+                        min: xAxisMin,
+                        max: xAxisMax,
+                        title: { display: true, text: 'Note Scale' },
+                        grid: {
+                            color: (context) => {
+                                if (!context.tick) return '#eee';
+                                const note = getNoteName(context.tick.value);
+                                return (note.semitone % 12 === 0) ? '#ccc' : '#f4f4f4';
+                            },
+                            lineWidth: (context) => (context.tick && getNoteName(context.tick.value).semitone % 12 === 0) ? 2 : 1
+                        },
+                        afterBuildTicks: (axis) => {
+                            axis.ticks = ticks.map(v => ({ value: v }));
+                        },
+                        ticks: {
+                            callback: function(value) {
+                                const note = getNoteName(value);
+                                if ([0, 4, 8].includes(((note.semitone % 12) + 12) % 12)) {
+                                    return note.name + note.octave;
+                                }
+                                return "";
+                            },
+                            maxRotation: 0,
+                            autoSkip: false
+                        }
+                    },
+                    y: {
+                        min: yMin,
+                        max: yMax,
+                        title: { display: true, text: 'Magnitude (dB)' },
+                        ticks: { stepSize: 5 },
+                        grid: { 
+                            color: (c) => c.tick.value % 10 === 0 ? '#ddd' : '#f0f0f0',
+                            lineWidth: (c) => c.tick.value % 10 === 0 ? 1.5 : 1
+                        }
+                    }
+                },
+                plugins: {
+                    legend: { position: 'top' },
+                    tooltip: {
+                        callbacks: {
+                            title: (items) => {
+                                const f = parseFloat(items[0].label);
+                                const n = getNoteName(f);
+                                return `${f.toFixed(1)} Hz (${n.name}${n.octave})`;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        // --- Peak Table Rendering ---
+        const peakDiv = document.getElementById('peakContainer');
+        data.parts.forEach(p => {
+            let html = `<div class="card"><h2 class="part-${p.name}">${p.name} Peaks</h2><table>
+                <thead><tr><th>#</th><th>Freq</th><th>Note</th><th>dB</th></tr></thead><tbody>`;
+            p.peaks.forEach((pk, i) => {
+                const cents = pk.cents >= 0 ? "+" + pk.cents : pk.cents;
+                html += `<tr><td>${i+1}</td><td>${pk.freq}Hz</td><td><strong>${pk.note}</strong> (${cents})</td><td>${pk.db}</td></tr>`;
+            });
+            html += `</tbody></table></div>`;
+            peakDiv.innerHTML += html;
+        });
+    </script>
+</body>
+</html>
