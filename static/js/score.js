@@ -6,6 +6,7 @@
 import { STR_TO_ACC, ACC_TO_STR } from './spelling.js';
 import { writeScoreDocument, readScoreDocument, newChordId, SCORE_STORAGE_KEY } from './score-store.js';
 import { VOWEL_PRESETS_EAR } from './state.js';
+import { createDocumentStore } from './document-store.js';
 
 (function () {
     const engine = window["barbershop-engine"];
@@ -17,6 +18,28 @@ import { VOWEL_PRESETS_EAR } from './state.js';
     const summaryEl = document.getElementById('summary');
     const warningsEl = document.getElementById('warnings');
     const chordsEl = document.getElementById('chords');
+    const dirtyIndicatorEl = document.getElementById('dirtyIndicator');
+
+    // One store instance for this tab, tracking score:current's dirty state (against the last
+    // import/export, not against the continuous autosave below) and holding a document-level
+    // undo/redo stack (plan.md §10.7). currentDoc itself stays in its existing flat
+    // {chords, metadata, updatedAt} shape for compatibility with syncChordToScoreDocument() and
+    // the storage-event listener below -- sourceLabel/sourceSnapshot just ride along as extra
+    // sibling fields rather than nesting the whole doc under the store's own {content, ...} shape.
+    const scoreStore = createDocumentStore(SCORE_STORAGE_KEY);
+
+    function scoreContent(doc) {
+        return { chords: doc.chords, metadata: doc.metadata };
+    }
+
+    function updateDirtyIndicator() {
+        if (!dirtyIndicatorEl) return;
+        const dirty = !!currentDoc && scoreStore.isDirty({
+            content: scoreContent(currentDoc),
+            sourceSnapshot: currentDoc.sourceSnapshot,
+        });
+        dirtyIndicatorEl.textContent = dirty ? '● Unsaved changes' : '';
+    }
 
     let currentXml = null;
     let currentResult = null;
@@ -162,8 +185,15 @@ import { VOWEL_PRESETS_EAR } from './state.js';
                 },
                 updatedAt: Date.now(),
             };
+            // A new document invalidates any undo/redo history from whatever was open before --
+            // see document-store.js's markImported doc comment.
+            const importSnap = scoreStore.markImported(scoreContent(currentDoc), file.name);
+            currentDoc.sourceLabel = importSnap.sourceLabel;
+            currentDoc.sourceSnapshot = importSnap.sourceSnapshot;
+            currentDoc.updatedAt = importSnap.updatedAt;
             writeScoreDocument(currentDoc);
             render();
+            updateDirtyIndicator();
             exportBtn.disabled = false;
             setStatus(`Loaded ${file.name} (${currentDoc.chords.length} chords) — click "Edit" on a row to open it.`);
         } catch (e) {
@@ -171,6 +201,7 @@ import { VOWEL_PRESETS_EAR } from './state.js';
             currentDoc = null;
             setStatus('Import failed: ' + e.message, true);
             exportBtn.disabled = true;
+            updateDirtyIndicator();
         }
     };
 
@@ -182,6 +213,7 @@ import { VOWEL_PRESETS_EAR } from './state.js';
         if (e.key !== SCORE_STORAGE_KEY || !currentDoc) return;
         currentDoc = readScoreDocument();
         render();
+        updateDirtyIndicator();
         setStatus('Score updated from another tab.');
     });
 
@@ -220,6 +252,17 @@ import { VOWEL_PRESETS_EAR } from './state.js';
             a.download = 'reexported.musicxml';
             a.click();
             URL.revokeObjectURL(url);
+            // The exported content now also matches the file on disk -- move the dirty baseline,
+            // but (unlike import) leave undo/redo history alone; it's still the same document,
+            // still valid to step back through past this point (plan.md §10.7.2).
+            const exportSnap = scoreStore.markExported({
+                content: scoreContent(currentDoc),
+                sourceLabel: currentDoc.sourceLabel,
+            });
+            currentDoc.sourceSnapshot = exportSnap.sourceSnapshot;
+            currentDoc.updatedAt = exportSnap.updatedAt;
+            writeScoreDocument(currentDoc);
+            updateDirtyIndicator();
             setStatus('Exported current edits to reexported.musicxml.');
         } catch (e) {
             setStatus('Export failed: ' + e.message, true);

@@ -13,6 +13,7 @@
         button:disabled { opacity: 0.5; cursor: default; }
         .status { font-size: 0.85rem; color: #555; min-height: 1.2em; margin-bottom: 10px; }
         .status.error { color: #c0392b; }
+        #dirtyIndicator { font-size: 0.85rem; color: #a15c00; font-weight: bold; }
         #summary { font-size: 0.9rem; color: #333; margin-bottom: 10px; }
         #warnings { font-size: 0.85rem; color: #a15c00; margin-bottom: 10px; }
         table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
@@ -38,6 +39,7 @@
     <div class="row">
         <input type="file" id="xmlFile" accept=".xml,.musicxml">
         <button id="exportBtn" disabled>Export score</button>
+        <span id="dirtyIndicator"></span>
     </div>
     <div id="status" class="status"></div>
     <div id="summary"></div>

@@ -1,6 +1,13 @@
 /* state.js Serial: #012 */
 import { STR_TO_ACC, ACC_TO_STR } from './spelling.js';
-import { readScoreDocument, writeScoreDocument } from './score-store.js';
+import { readScoreDocument, writeScoreDocument, SCORE_STORAGE_KEY } from './score-store.js';
+import { createDocumentStore } from './document-store.js';
+
+// This tab's own store instance for reading score:current's dirty state (plan.md §10.7.4) --
+// never used for undo/redo here (a ?sid= Chord-editor tab's undo stack is local to that one
+// chord's fields, a different concern from the Score document's own import/export baseline; see
+// isScoreDocumentDirty() below and syncChordToScoreDocument() further down).
+const scoreDocStore = createDocumentStore(SCORE_STORAGE_KEY);
 
 export const VOWEL_PRESETS_LEGACY = {
     'i': [270, 2290, 3010], 'y': [270, 1800, 2300], 'ɪ': [390, 1990, 2550],
@@ -301,6 +308,23 @@ export function loadStateFromURL() {
  * (triggerMutation, the tuningUpdate handler) — no new trigger rule, per §6.2's design; this
  * just makes those same commits also persist to the shared document, matched by id.
  */
+/**
+ * Whether score:current has diverged from the last file it was imported from or exported to
+ * (plan.md §10.7.2/§10.7.4). A ?sid= Chord-editor tab has no dirty concept of its own -- every
+ * edit already writes straight into score:current live via syncChordToScoreDocument() below, so
+ * this mirrors the *Score* document's own baseline rather than computing an independent one.
+ * Not yet called from any UI (that's main.js's job, once the document strip exists) -- exported
+ * so that wiring can read it directly instead of re-deriving the comparison.
+ */
+export function isScoreDocumentDirty() {
+    const doc = readScoreDocument();
+    if (!doc) return false;
+    return scoreDocStore.isDirty({
+        content: { chords: doc.chords, metadata: doc.metadata },
+        sourceSnapshot: doc.sourceSnapshot,
+    });
+}
+
 export function syncChordToScoreDocument() {
     if (!appState.ui.editingScoreChordId || appState.ui.scoreChordNotFound) return;
     const doc = readScoreDocument();
