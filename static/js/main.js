@@ -130,6 +130,62 @@ function renderUI() {
     }
 }
 
+// Maps engine/wav_chord_detector.py's output onto this chord's voices/tuning. Spelling is
+// resolved here (not server-side) via the same getVariations() logic used for every other
+// note edit in this app, spelling each voice in turn with the already-placed voices as
+// false-relation context -- low to high, same order a person would spell a chord by hand.
+// The detector only labels however many distinct voices it actually found (see its
+// docstring), so a chord with a unison/octave doubling leaves the remaining voice(s)
+// untouched rather than guessing.
+const WAV_PART_TO_VOICE_IDX = { Bass: 0, Bari: 1, Lead: 2, Tenor: 3 };
+
+function applyDetectedVoices(notes) {
+    const chord = appState.chords[appState.activeChordIndex];
+    const context = [];
+    notes.forEach(n => {
+        const idx = WAV_PART_TO_VOICE_IDX[n.part];
+        if (idx === undefined) return;
+        const guessOct = Math.floor(n.app_semitone / 12);
+        const spelled = getVariations(n.app_semitone, guessOct, context)[0];
+        chord.voices[idx] = Object.assign({}, chord.voices[idx], spelled, { rest: false });
+        chord.tuning[idx] = n.cents;
+        context.push({ step: spelled.step, semi: n.app_semitone });
+    });
+    // The whole point is to capture the *real* sung cents -- switch to custom intonation so
+    // the next analysis pass doesn't immediately overwrite them with a computed value (same
+    // protection the tuningUpdate manual-edit path already relies on).
+    appState.settings.intonation = 'custom';
+    const customInt = document.querySelector('input[name="intonation"][value="custom"]');
+    if (customInt) customInt.checked = true;
+    triggerMutation(true);
+}
+
+async function loadChordFromWav() {
+    const fileInput = document.getElementById('wavChordFile');
+    const statusEl = document.getElementById('wavChordStatus');
+    const file = fileInput && fileInput.files[0];
+    if (!file) return;
+
+    if (statusEl) statusEl.textContent = 'Analyzing...';
+    try {
+        const formData = new FormData();
+        formData.append('file', file);
+        const res = await fetch('detect-chord-wav', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (data.error) {
+            if (statusEl) statusEl.textContent = 'Error: ' + data.error;
+            return;
+        }
+        applyDetectedVoices(data.notes);
+        const warning = (data.warnings || [])[0];
+        if (statusEl) statusEl.textContent = warning || `Loaded ${data.notes.length} voice(s).`;
+    } catch (e) {
+        if (statusEl) statusEl.textContent = 'Analysis failed: ' + e.message;
+    } finally {
+        fileInput.value = '';
+    }
+}
+
 export function triggerMutation(skipSync = false) {
     // Explicitly check for boolean true to avoid treating Event objects as 'skipSync'
     if (skipSync !== true) syncInputsToState();
@@ -177,6 +233,7 @@ function init() {
 
     safeListen('rootlessToggle', 'onchange', triggerMutation);
     safeListen('offlineToggle', 'onchange', triggerMutation);
+    safeListen('wavChordFile', 'onchange', loadChordFromWav);
     safeListen('legacyVocalToggle', 'onchange', () => {
         appState.settings.presetVersion = document.getElementById('legacyVocalToggle').checked ? 'legacy' : 'ear';
         const chord = appState.chords[appState.activeChordIndex];

@@ -29,15 +29,15 @@
         directly in the browser and immediately saves the chords into this browser's shared
         Score document — each row's "Edit" link then opens that chord in the full Chord-page
         editor (in a new tab), and edits there sync back here live (plan.md &sect;10.2).
-        "Export unchanged" re-runs the <em>original</em> file through the exporter untouched, to
-        prove the round trip — it does not yet include your edits (cents/vowel/notes currently
-        only live in the browser; MusicXML export of them is deferred, plan.md &sect;5).
+        "Export score" writes out the current state of the score, including any edits made via
+        each row's "Edit" link (cents/vowel/notes) — it reflects whatever's currently saved in
+        this browser's shared Score document, not necessarily the original file.
         Volume-per-part isn't wired up yet; whole-score playback isn't built yet either
         (plan.md &sect;10.5).
     </p>
     <div class="row">
         <input type="file" id="xmlFile" accept=".xml,.musicxml">
-        <button id="exportBtn" disabled>Export unchanged</button>
+        <button id="exportBtn" disabled>Export score</button>
     </div>
     <div id="status" class="status"></div>
     <div id="summary"></div>
