@@ -7,7 +7,6 @@
         body { font-family: system-ui, sans-serif; background: #f0f2f5; padding: 20px; display: flex; flex-direction: column; align-items: center; }
         .card { background: white; padding: 30px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.08); width: 800px; }
         h1 { margin-top: 0; font-size: 1.1rem; color: #666; }
-        .note { font-size: 0.8rem; color: #999; margin-bottom: 20px; }
         .row { display: flex; gap: 10px; align-items: center; margin-bottom: 15px; }
         button { cursor: pointer; border: 1px solid #ccc; background: white; padding: 8px 16px; border-radius: 6px; font-weight: bold; }
         button:disabled { opacity: 0.5; cursor: default; }
@@ -31,18 +30,6 @@
 <body>
 <div class="card">
     <h1>Barbershop Score — MusicXML import (experimental)</h1>
-    <p class="note">
-        Choosing a MusicXML file loads it through the Kotlin engine (<code>engine-kt</code>)
-        directly in the browser and immediately saves the chords into this browser's shared
-        Score document — each row's "Edit" link then opens that chord in the full Chord-page
-        editor (in a new tab), and edits there sync back here live (plan.md &sect;10.2).
-        "Export score" writes out the current state of the score, including any edits made via
-        each row's "Edit" link (cents/vowel/notes) — it reflects whatever's currently saved in
-        this browser's shared Score document, not necessarily the original file.
-        Whole-score playback (plan.md &sect;10.5) converts each chord's beats into real time using
-        the tempo below; the 4-part mix and mute are playback-only, not saved to the score or the
-        exported file.
-    </p>
     <div class="row doc-strip">
         <span id="docLabel">No file loaded</span>
         <span id="dirtyIndicator"></span>
@@ -75,20 +62,21 @@
         <span style="color: #666; font-weight: bold;">Mix:</span>
         <label style="display: flex; align-items: center; gap: 4px;">Tenor
             <input type="range" id="mix-vol-3" min="0" max="1" step="0.05" value="1" style="width: 60px;">
-            <input type="checkbox" id="mix-mute-3" title="Mute Tenor">
+            <input type="checkbox" id="mix-mute-3" title="Mute Tenor"> Mute
         </label>
         <label style="display: flex; align-items: center; gap: 4px;">Lead
             <input type="range" id="mix-vol-2" min="0" max="1" step="0.05" value="1" style="width: 60px;">
-            <input type="checkbox" id="mix-mute-2" title="Mute Lead">
+            <input type="checkbox" id="mix-mute-2" title="Mute Lead"> Mute
         </label>
         <label style="display: flex; align-items: center; gap: 4px;">Bari
             <input type="range" id="mix-vol-1" min="0" max="1" step="0.05" value="1" style="width: 60px;">
-            <input type="checkbox" id="mix-mute-1" title="Mute Bari">
+            <input type="checkbox" id="mix-mute-1" title="Mute Bari"> Mute
         </label>
         <label style="display: flex; align-items: center; gap: 4px;">Bass
             <input type="range" id="mix-vol-0" min="0" max="1" step="0.05" value="1" style="width: 60px;">
-            <input type="checkbox" id="mix-mute-0" title="Mute Bass">
+            <input type="checkbox" id="mix-mute-0" title="Mute Bass"> Mute
         </label>
+        <span style="color: #999;">(mix and mute are for listening only — not saved with the score)</span>
     </div>
     <div id="status" class="status"></div>
     <div id="summary"></div>
