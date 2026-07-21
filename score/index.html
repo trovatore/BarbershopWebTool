@@ -49,6 +49,18 @@
         <input type="file" id="xmlFile" accept=".xml,.musicxml">
         <button id="exportBtn" disabled>Export score</button>
     </div>
+    <div class="row" style="font-size: 0.85rem;">
+        <label for="retuneIntonation">Re-tune all chords to:</label>
+        <select id="retuneIntonation">
+            <option value="just" selected>Just</option>
+            <option value="pythagorean">Pythagorean</option>
+            <option value="equal">Equal</option>
+        </select>
+        <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
+            <input type="checkbox" id="retuneRootless"> Allow rootless 9ths
+        </label>
+        <button id="retuneBtn" disabled title="Recomputes cents for every chord using the offline theory engine — overwrites any existing cents, including manual ones">Re-tune All</button>
+    </div>
     <div id="status" class="status"></div>
     <div id="summary"></div>
     <div id="warnings"></div>

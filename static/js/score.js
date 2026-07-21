@@ -5,8 +5,9 @@
    "preview without committing" state anymore. */
 import { STR_TO_ACC, ACC_TO_STR } from './spelling.js';
 import { writeScoreDocument, readScoreDocument, newChordId, SCORE_STORAGE_KEY } from './score-store.js';
-import { VOWEL_PRESETS_EAR } from './state.js';
+import { VOWEL_PRESETS_EAR, getNoteString } from './state.js';
 import { createDocumentStore } from './document-store.js';
+import { analyzeChord } from './theory.js';
 
 (function () {
     const engine = window["barbershop-engine"];
@@ -14,6 +15,9 @@ import { createDocumentStore } from './document-store.js';
 
     const fileInput = document.getElementById('xmlFile');
     const exportBtn = document.getElementById('exportBtn');
+    const retuneBtn = document.getElementById('retuneBtn');
+    const retuneIntonationEl = document.getElementById('retuneIntonation');
+    const retuneRootlessEl = document.getElementById('retuneRootless');
     const statusEl = document.getElementById('status');
     const summaryEl = document.getElementById('summary');
     const warningsEl = document.getElementById('warnings');
@@ -34,8 +38,9 @@ import { createDocumentStore } from './document-store.js';
     }
 
     // Document label + dirty indicator (plan.md §10.7.5) -- no Undo/Redo here, deliberately: the
-    // only Score-level mutation is import, and §10.7.9 resolved not to build undo-of-import,
-    // just the confirm-before-discard guard below. Per-chord undo lives on the Chord-editor side.
+    // two Score-level mutations (import, bulk re-tune below) both get a confirm-before-discard/
+    // -overwrite guard instead, matching §10.7.9's resolution that a prompt is protection enough
+    // without a separate undo mechanism. Per-chord undo lives on the Chord-editor side.
     function updateDocStrip() {
         if (docLabelEl) docLabelEl.textContent = (currentDoc && currentDoc.sourceLabel) || 'No file loaded';
         if (!dirtyIndicatorEl) return;
@@ -210,12 +215,14 @@ import { createDocumentStore } from './document-store.js';
             render();
             updateDocStrip();
             exportBtn.disabled = false;
+            retuneBtn.disabled = false;
             setStatus(`Loaded ${file.name} (${currentDoc.chords.length} chords) — click "Edit" on a row to open it.`);
         } catch (e) {
             currentResult = null;
             currentDoc = null;
             setStatus('Import failed: ' + e.message, true);
             exportBtn.disabled = true;
+            retuneBtn.disabled = true;
             updateDocStrip();
         }
     };
@@ -282,6 +289,48 @@ import { createDocumentStore } from './document-store.js';
         } catch (e) {
             setStatus('Export failed: ' + e.message, true);
         }
+    };
+
+    // Bulk re-tune (plan.md §10.2's Score-page punch list): recompute cents for every chord at
+    // once instead of opening each one individually to trigger analysis. Uses the offline
+    // theory.js engine directly (synchronous, no network round trips) rather than /analyze --
+    // the same engine main.js falls back to in Offline Mode, and fast enough that even a large
+    // score needs no progress indicator. allow_rootless is one global choice for the whole run,
+    // not per-chord -- the Score data model has no place to store a per-chord override anyway.
+    // Unconditionally overwrites every chord's cents, including any set by hand -- there's no
+    // "custom, don't touch" flag in this data model (only the Chord-editor page's *global*
+    // intonation setting has a 'custom' mode, chords here are just numbers) -- so this is
+    // confirmed like any other bulk-overwrite action rather than getting its own undo mechanism,
+    // matching §10.7.9's resolution that a prompt is sufficient protection.
+    retuneBtn.onclick = () => {
+        if (!currentDoc) return;
+        const tuningStyle = retuneIntonationEl.value;
+        const allowRootless = retuneRootlessEl.checked;
+        const total = currentDoc.chords.length;
+        if (!window.confirm(`Recompute cents for all ${total} chords using ${retuneIntonationEl.options[retuneIntonationEl.selectedIndex].text} tuning? This overwrites any existing cents, including manual ones.`)) {
+            return;
+        }
+
+        let retuned = 0;
+        let skipped = 0;
+        currentDoc.chords.forEach(chord => {
+            const noteStrs = chord.voices.map(v => getNoteString(v));
+            const result = analyzeChord(noteStrs, { allow_rootless: allowRootless, tuning_style: tuningStyle });
+            // An unrecognized chord (fewer than 3 real notes, or no matching pattern) comes back
+            // with notes: [] -- leave its existing cents alone rather than wiping them to nothing.
+            if (result.notes && result.notes.length === chord.voices.length) {
+                chord.tuning = result.notes.map(n => n.tuning);
+                retuned++;
+            } else {
+                skipped++;
+            }
+        });
+
+        currentDoc.updatedAt = Date.now();
+        writeScoreDocument(currentDoc);
+        render();
+        updateDocStrip();
+        setStatus(`Re-tuned ${retuned} of ${total} chords to ${tuningStyle}` + (skipped ? ` (${skipped} unrecognized chord(s) left unchanged).` : '.'));
     };
 
     if (!WebApi) {
