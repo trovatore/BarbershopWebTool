@@ -39,8 +39,9 @@
         "Export score" writes out the current state of the score, including any edits made via
         each row's "Edit" link (cents/vowel/notes) — it reflects whatever's currently saved in
         this browser's shared Score document, not necessarily the original file.
-        Volume-per-part isn't wired up yet; whole-score playback isn't built yet either
-        (plan.md &sect;10.5).
+        Whole-score playback (plan.md &sect;10.5) converts each chord's beats into real time using
+        the tempo below; the 4-part mix and mute are playback-only, not saved to the score or the
+        exported file.
     </p>
     <div class="row doc-strip">
         <span id="docLabel">No file loaded</span>
@@ -62,6 +63,32 @@
             <input type="checkbox" id="retuneRootless"> Allow rootless 9ths
         </label>
         <button id="retuneBtn" disabled title="Recomputes cents for every chord using the offline theory engine — overwrites any existing cents, including manual ones">Re-tune All</button>
+    </div>
+    <div class="row" style="font-size: 0.85rem; flex-wrap: wrap;">
+        <label for="scoreBpm">Tempo: <input type="number" id="scoreBpm" value="120" min="20" max="300" style="width: 55px;"> BPM</label>
+        <button id="playScoreBtn" disabled>▶ Play Score</button>
+        <button id="stopScoreBtn" disabled>■ Stop</button>
+        <button id="saveScoreWavBtn" disabled>💾 Save Score .wav</button>
+        <span id="scorePlaybackStatus" style="color: #888;"></span>
+    </div>
+    <div class="row" style="font-size: 0.8rem; flex-wrap: wrap;">
+        <span style="color: #666; font-weight: bold;">Mix:</span>
+        <label style="display: flex; align-items: center; gap: 4px;">Tenor
+            <input type="range" id="mix-vol-3" min="0" max="1" step="0.05" value="1" style="width: 60px;">
+            <input type="checkbox" id="mix-mute-3" title="Mute Tenor">
+        </label>
+        <label style="display: flex; align-items: center; gap: 4px;">Lead
+            <input type="range" id="mix-vol-2" min="0" max="1" step="0.05" value="1" style="width: 60px;">
+            <input type="checkbox" id="mix-mute-2" title="Mute Lead">
+        </label>
+        <label style="display: flex; align-items: center; gap: 4px;">Bari
+            <input type="range" id="mix-vol-1" min="0" max="1" step="0.05" value="1" style="width: 60px;">
+            <input type="checkbox" id="mix-mute-1" title="Mute Bari">
+        </label>
+        <label style="display: flex; align-items: center; gap: 4px;">Bass
+            <input type="range" id="mix-vol-0" min="0" max="1" step="0.05" value="1" style="width: 60px;">
+            <input type="checkbox" id="mix-mute-0" title="Mute Bass">
+        </label>
     </div>
     <div id="status" class="status"></div>
     <div id="summary"></div>

@@ -8,6 +8,19 @@ import { writeScoreDocument, readScoreDocument, newChordId, SCORE_STORAGE_KEY } 
 import { VOWEL_PRESETS_EAR, getNoteString } from './state.js';
 import { createDocumentStore } from './document-store.js';
 import { analyzeChord } from './theory.js';
+import { playScore, stopScorePlayback, saveScoreAsWav } from './audio.js';
+
+// Fixed vibrato/formant-Q defaults, matching state.js's appState.settings.audio -- the Chord
+// page's own knobs for these -- since /score has no equivalent UI (plan.md §10.5 only asked for
+// tempo + the 4-part mix + mute, not a full audio-settings panel here too). vps/volume match the
+// Chord page's own hardcoded defaults for the same reason.
+const SCORE_AUDIO_DEFAULTS = {
+    vibratoJitterCutoff: 100, vibratoJitterAmount: 2.5,
+    phaseJitter: 0.08, vibratoDepth: 0.006,
+    vibratoRateMean: 5.2, vibratoRateRange: 1.2,
+    q1: 10, q2: 15,
+    vps: 4, volume: 0.05,
+};
 
 (function () {
     const engine = window["barbershop-engine"];
@@ -18,12 +31,34 @@ import { analyzeChord } from './theory.js';
     const retuneBtn = document.getElementById('retuneBtn');
     const retuneIntonationEl = document.getElementById('retuneIntonation');
     const retuneRootlessEl = document.getElementById('retuneRootless');
+    const scoreBpmEl = document.getElementById('scoreBpm');
+    const playScoreBtn = document.getElementById('playScoreBtn');
+    const stopScoreBtn = document.getElementById('stopScoreBtn');
+    const saveScoreWavBtn = document.getElementById('saveScoreWavBtn');
+    const scorePlaybackStatusEl = document.getElementById('scorePlaybackStatus');
     const statusEl = document.getElementById('status');
     const summaryEl = document.getElementById('summary');
     const warningsEl = document.getElementById('warnings');
     const chordsEl = document.getElementById('chords');
     const dirtyIndicatorEl = document.getElementById('dirtyIndicator');
     const docLabelEl = document.getElementById('docLabel');
+    let playbackResetTimer = null;
+
+    // [{volume, mute}, ...] indexed Bass/Bari/Lead/Tenor, matching VOICE_ORDER below -- read
+    // fresh each time rather than cached, so adjusting a slider mid-playback has no effect on a
+    // chord already scheduled (WebAudio's automation is already committed at schedule time) but
+    // does apply to the next Play/Save.
+    function readMixer() {
+        return [0, 1, 2, 3].map(i => ({
+            volume: parseFloat(document.getElementById(`mix-vol-${i}`).value) || 0,
+            mute: document.getElementById(`mix-mute-${i}`).checked,
+        }));
+    }
+
+    function setPlaybackButtonsEnabled(enabled) {
+        playScoreBtn.disabled = !enabled;
+        saveScoreWavBtn.disabled = !enabled;
+    }
 
     // One store instance for this tab, tracking score:current's dirty state (against the last
     // import/export, not against the continuous autosave below) and holding a document-level
@@ -232,6 +267,7 @@ import { analyzeChord } from './theory.js';
             updateDocStrip();
             exportBtn.disabled = false;
             retuneBtn.disabled = false;
+            setPlaybackButtonsEnabled(true);
             setStatus(`Loaded ${file.name} (${currentDoc.chords.length} chords) — click "Edit" on a row to open it.`);
         } catch (e) {
             currentResult = null;
@@ -239,6 +275,7 @@ import { analyzeChord } from './theory.js';
             setStatus('Import failed: ' + e.message, true);
             exportBtn.disabled = true;
             retuneBtn.disabled = true;
+            setPlaybackButtonsEnabled(false);
             updateDocStrip();
         }
     };
@@ -347,6 +384,50 @@ import { analyzeChord } from './theory.js';
         render();
         updateDocStrip();
         setStatus(`Re-tuned ${retuned} of ${total} chords to ${tuningStyle}` + (skipped ? ` (${skipped} unrecognized chord(s) left unchanged).` : '.'));
+    };
+
+    // Whole-score playback (plan.md §10.5): converts each chord's beats into real seconds via the
+    // BPM field, plays every chord back to back through the same synthesis engine the Chord page
+    // uses. The 4-part mix/mute is playback-only -- read fresh from the sliders, never written to
+    // score:current or the exported file.
+    playScoreBtn.onclick = () => {
+        if (!currentDoc || !currentDoc.chords.length) return;
+        const bpm = parseFloat(scoreBpmEl.value) || 120;
+        stopScorePlayback(); // in case a previous playback is still ringing out
+        const totalSeconds = playScore(currentDoc.chords, bpm, readMixer(), SCORE_AUDIO_DEFAULTS);
+        setPlaybackButtonsEnabled(false);
+        stopScoreBtn.disabled = false;
+        scorePlaybackStatusEl.textContent = `Playing (${totalSeconds.toFixed(1)}s)…`;
+        clearTimeout(playbackResetTimer);
+        playbackResetTimer = setTimeout(() => {
+            setPlaybackButtonsEnabled(true);
+            stopScoreBtn.disabled = true;
+            scorePlaybackStatusEl.textContent = '';
+        }, totalSeconds * 1000);
+    };
+
+    stopScoreBtn.onclick = () => {
+        clearTimeout(playbackResetTimer);
+        stopScorePlayback();
+        setPlaybackButtonsEnabled(true);
+        stopScoreBtn.disabled = true;
+        scorePlaybackStatusEl.textContent = '';
+    };
+
+    saveScoreWavBtn.onclick = async () => {
+        if (!currentDoc || !currentDoc.chords.length) return;
+        const bpm = parseFloat(scoreBpmEl.value) || 120;
+        setPlaybackButtonsEnabled(false);
+        scorePlaybackStatusEl.textContent = 'Rendering .wav…';
+        try {
+            await saveScoreAsWav(currentDoc.chords, bpm, readMixer(), SCORE_AUDIO_DEFAULTS);
+            scorePlaybackStatusEl.textContent = '';
+        } catch (e) {
+            scorePlaybackStatusEl.textContent = '';
+            setStatus('Save .wav failed: ' + e.message, true);
+        } finally {
+            setPlaybackButtonsEnabled(true);
+        }
     };
 
     if (!WebApi) {

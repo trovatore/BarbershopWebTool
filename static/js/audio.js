@@ -171,6 +171,86 @@ export async function saveChordAsWav(chordState, tuningData, opts) {
     link.click();
 }
 
+// createVoice's envelope is a fixed attack(0.15s) + release(0.5s), regardless of note duration --
+// fine for the single-chord page (duration is always several seconds), but a real score's short
+// notes (an eighth note at a fast tempo can be well under 0.65s) would push the release ramp's
+// start time before the attack ramp's end time, an invalid (out-of-order) automation schedule.
+// Floors each chord's *ring* duration at a safe minimum above that, while start TIMES still
+// advance on the literal beat -- a short chord rings past its nominal slot into the next chord's
+// attack, the same overlap a real singer's legato would produce, rather than truncating the
+// release or inverting the envelope.
+const MIN_CHORD_SECONDS = 0.7;
+
+// Shared by playScore/saveScoreAsWav so live playback and the rendered .wav can never disagree
+// about timing. Returns each chord's {start, duration} in seconds from t=0, plus the total
+// render length -- which is NOT simply the last chord's end, since an earlier short chord's
+// floored ring-out can (rarely) extend past a later chord's own nominal end if several short
+// chords cluster together; take the max across every chord's own end, not just the last one.
+function buildScoreSchedule(chords, bpm) {
+    const secondsPerBeat = 60 / bpm;
+    let t = 0;
+    let maxEnd = 0;
+    const scheduled = chords.map(chord => {
+        const beatSeconds = chord.beats * secondsPerBeat;
+        const duration = Math.max(beatSeconds, MIN_CHORD_SECONDS);
+        const entry = { chord, start: t, duration };
+        maxEnd = Math.max(maxEnd, t + duration);
+        t += beatSeconds;
+        return entry;
+    });
+    return { scheduled, totalSeconds: Math.max(maxEnd, t) };
+}
+
+// mixer: [{volume, mute}, ...] indexed Bass/Bari/Lead/Tenor same as everywhere else in the app --
+// a score-playback-only 4-part balance (plan.md §10.5), never persisted to score:current or the
+// exported file, distinct from any chord/part's own settings. Each chord's own vowel formants
+// (f1/f2/f3) are used as-is -- unlike the single-chord page, a score chord already carries its
+// own real vowel, no global override needed.
+export function playScore(chords, bpm, mixer, baseOpts) {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const partSettings = mixer.map(m => ({ volume: m.volume, mute: m.mute }));
+    const { scheduled, totalSeconds } = buildScoreSchedule(chords, bpm);
+    const startAt = audioCtx.currentTime;
+    scheduled.forEach(({ chord, start, duration }) => {
+        setupAudioGraph(audioCtx, chord.voices, startAt + start, duration, chord.tuning, {
+            ...baseOpts, ...chord.formants, partSettings,
+        });
+    });
+    return totalSeconds;
+}
+
+// Closing the context stops every currently-scheduled node at once -- WebAudio has no single
+// "cancel everything I scheduled" call otherwise. The next playScore() call creates a fresh one.
+export function stopScorePlayback() {
+    if (audioCtx) {
+        audioCtx.close();
+        audioCtx = null;
+    }
+}
+
+export async function saveScoreAsWav(chords, bpm, mixer, baseOpts) {
+    const sr = 44100;
+    const partSettings = mixer.map(m => ({ volume: m.volume, mute: m.mute }));
+    const { scheduled, totalSeconds } = buildScoreSchedule(chords, bpm);
+    const offlineCtx = new OfflineAudioContext(4, Math.ceil(sr * totalSeconds), sr);
+    scheduled.forEach(({ chord, start, duration }) => {
+        setupAudioGraph(offlineCtx, chord.voices, start, duration, chord.tuning, {
+            ...baseOpts, ...chord.formants, partSettings,
+        }, true);
+    });
+    const buffer = await offlineCtx.startRendering();
+    const data = new Float32Array(buffer.length * 4);
+    for (let i = 0; i < buffer.length; i++) {
+        for (let ch = 0; ch < 4; ch++) data[i * 4 + ch] = buffer.getChannelData(ch)[i];
+    }
+    const blob = encodeWAV(data, 4, sr);
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `score.wav`;
+    link.click();
+}
+
 /**
  * Standard Radix-2 FFT Implementation
  */
