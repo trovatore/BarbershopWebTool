@@ -4,10 +4,76 @@ import { renderControls, handleGlobalKey, SERIAL as S_UI } from './ui-controls.j
 import { drawChord, SERIAL as S_NOT } from './notation.js';
 import { playChord, saveChordAsWav, analyzeAndShow, SERIAL as S_AUD } from './audio.js';
 import { analyzeChord, SERIAL as S_THY } from './theory.js';
-import { appState, syncInputsToState, syncStateToInputs, loadStateFromURL, generatePermalink, getNoteString, syncChordToScoreDocument, VOWEL_PRESETS_LEGACY, VOWEL_PRESETS_EAR } from './state.js';
+import { appState, syncInputsToState, syncStateToInputs, loadStateFromURL, generatePermalink, getNoteString, syncChordToScoreDocument, syncChordToStandaloneDocument, isScoreDocumentDirty, isChordDocumentDirty, establishFreshChordBaseline, VOWEL_PRESETS_LEGACY, VOWEL_PRESETS_EAR } from './state.js';
+import { createDocumentStore } from './document-store.js';
+import { readChordDocument } from './chord-store.js';
 
 const S_IDX = "#067-STABLE";
 const SHOW_SERIALS = false;
+
+// True only until the very first, page-load-triggered analysis pass settles (cleared at the end
+// of init(), below). Guards updateAnalysisResult()'s sync calls -- see the comment there.
+let bootstrapping = true;
+
+// Fine-grained, per-tab undo stack scoped to just the one chord being edited -- whether the
+// standalone default chord or a live ?sid= Score chord (plan.md §10.7.3/§10.7.4). Separate from
+// chord:current/score:current's own persistence -- just an in-memory undo/redo stack, same as
+// any editor's history: gone on reload, never shared across tabs.
+const chordUndoStore = createDocumentStore('chord:undo-scratch');
+
+// The snapshot bundles the chord together with settings.intonation, even though intonation is a
+// global setting, not a chord field -- because updateAnalysisResult() overwrites chord.tuning
+// off of whatever intonation currently is, any time it isn't 'custom'. Snapshotting the chord
+// alone would let a later triggerMutation() (including the one undo/redo() themselves call, to
+// refresh chord.analysis for the restored notes) immediately re-fetch analysis and re-clobber
+// the just-restored tuning with fresh values for whatever intonation is *currently* selected --
+// caught live in a real browser: switching to "Just" then Ctrl+Z left the custom cents undone
+// only for an instant before the undo's own re-analysis silently wrote them right back over.
+// Other global settings (rootless, offline, audio/vibrato prefs, part volume/mute) don't have
+// this problem -- they don't gate whether chord.tuning gets overwritten -- so they stay out of
+// scope, along with continuous drag inputs (f1/f2/f3, vibrato sliders, part dials), which fire on
+// every 'input' tick and don't go through triggerMutation()/sync to score:current today either
+// (a pre-existing gap, not something this pass changes).
+function undoRedoContent() {
+    return {
+        chord: appState.chords[appState.activeChordIndex],
+        intonation: appState.settings.intonation,
+    };
+}
+
+function applyUndoRedoContent(snap) {
+    appState.chords[appState.activeChordIndex] = snap.chord;
+    appState.settings.intonation = snap.intonation;
+}
+
+// Call as the first thing inside any handler that's about to mutate the active chord's own
+// fields (voices/tuning/vowel/formants) or flip intonation.
+function pushChordUndo() {
+    chordUndoStore.pushUndo(undoRedoContent());
+}
+
+// Exported for a future document-strip UI to disable/enable Undo/Redo buttons (not built yet --
+// keyboard shortcuts only in this pass), and used directly by the test suite below.
+export function canUndoChord() { return chordUndoStore.canUndo(); }
+export function canRedoChord() { return chordUndoStore.canRedo(); }
+
+export function undoChordEdit() {
+    const restored = chordUndoStore.undo(undoRedoContent());
+    if (!restored) return;
+    applyUndoRedoContent(restored);
+    // skipSync=true: the DOM still shows the pre-undo values (radios, sliders) -- pulling them
+    // in via syncInputsToState() would immediately clobber the just-restored chord. renderUI()
+    // pushes the restored state back OUT to the DOM instead, same trick applyDetectedVoices/the
+    // vowel and legacy-vowel handlers already rely on.
+    triggerMutation(true);
+}
+
+export function redoChordEdit() {
+    const restored = chordUndoStore.redo(undoRedoContent());
+    if (!restored) return;
+    applyUndoRedoContent(restored);
+    triggerMutation(true);
+}
 
 function getAudioSettings() {
     return {
@@ -83,8 +149,17 @@ function updateAnalysisResult(data, chord) {
         chord.tuning = data.notes.map(n => n.tuning);
         // Analysis resolves after triggerMutation()'s own (necessarily pre-analysis) sync call
         // already ran, so that earlier sync persisted stale tuning -- this is the point where
-        // the real, up-to-date values exist, and the only place that syncs them.
-        syncChordToScoreDocument();
+        // the real, up-to-date values exist, and the only place that syncs them. Skipped during
+        // the very first (page-load-triggered) analysis pass -- caught live: opening a ?sid=
+        // chord for editing and touching nothing still silently overwrote its stored tuning in
+        // score:current with a fresh recompute, the same over-triggering bug just fixed for the
+        // standalone case (establishFreshChordBaseline), just with no clean way to "re-baseline"
+        // a shared multi-chord document the same way -- so here the fix is simpler: don't sync a
+        // computation nobody asked for. A genuine edit's own commit point still syncs normally.
+        if (!bootstrapping) {
+            syncChordToScoreDocument();
+            syncChordToStandaloneDocument();
+        }
     }
     renderUI();
 }
@@ -128,6 +203,37 @@ function renderUI() {
             manifestEl.innerHTML = docsLink;
         }
     }
+
+    updateDocStrip();
+}
+
+// Document label + dirty indicator + Undo/Redo enabled-state (plan.md §10.7.5). A ?sid= tab's
+// dirty flag mirrors the *Score* document's own (§10.7.4 -- this tab has no independent dirty
+// concept, every edit already writes straight through), including while editingLabel is showing
+// the "not found" fallback, where nothing here is meaningfully trackable either way.
+function updateDocStrip() {
+    const labelEl = document.getElementById('docLabel');
+    if (labelEl) {
+        if (appState.ui.editingScoreChordId) {
+            labelEl.textContent = '';
+        } else {
+            const doc = readChordDocument();
+            labelEl.textContent = (doc && doc.sourceLabel) ? doc.sourceLabel : 'Untitled chord';
+        }
+    }
+
+    const dirtyEl = document.getElementById('docDirtyIndicator');
+    if (dirtyEl) {
+        const dirty = appState.ui.editingScoreChordId
+            ? (!appState.ui.scoreChordNotFound && isScoreDocumentDirty())
+            : isChordDocumentDirty();
+        dirtyEl.textContent = dirty ? '● Unsaved changes' : '';
+    }
+
+    const undoBtn = document.getElementById('undoBtn');
+    if (undoBtn) undoBtn.disabled = !canUndoChord();
+    const redoBtn = document.getElementById('redoBtn');
+    if (redoBtn) redoBtn.disabled = !canRedoChord();
 }
 
 // Maps engine/wav_chord_detector.py's output onto this chord's voices/tuning. Spelling is
@@ -140,7 +246,9 @@ function renderUI() {
 const WAV_PART_TO_VOICE_IDX = { Bass: 0, Bari: 1, Lead: 2, Tenor: 3 };
 
 function applyDetectedVoices(notes) {
+    if (!notes.length) return;
     const chord = appState.chords[appState.activeChordIndex];
+    pushChordUndo();
     const context = [];
     notes.forEach(n => {
         const idx = WAV_PART_TO_VOICE_IDX[n.part];
@@ -190,32 +298,36 @@ export function triggerMutation(skipSync = false) {
     // Explicitly check for boolean true to avoid treating Event objects as 'skipSync'
     if (skipSync !== true) syncInputsToState();
     syncChordToScoreDocument();
+    syncChordToStandaloneDocument();
     renderUI();
     fetchAnalysis();
 }
 
-function updateNote(idx, semiChange) {
+export function updateNote(idx, semiChange) {
     const chord = appState.chords[appState.activeChordIndex];
+    pushChordUndo();
     const context = chord.voices.map((s, i) => ({ step: s.step, semi: getAbsSemitone(s), idx: i })).filter(n => n.idx !== idx);
     chord.voices[idx] = Object.assign({}, chord.voices[idx], getVariations(getAbsSemitone(chord.voices[idx]) + semiChange, chord.voices[idx].oct, context)[0]);
     triggerMutation();
 }
 
-function manualUpdate(idx, val) {
+export function manualUpdate(idx, val) {
     const match = val.match(/^([a-gA-G])(bb|b|#|x)?([0-8])$/i);
     if (match) {
         const step = match[1].toLowerCase();
         const acc = STR_TO_ACC[match[2] ? match[2].toLowerCase() : ""];
         const oct = parseInt(match[3]);
         const chord = appState.chords[appState.activeChordIndex];
+        pushChordUndo();
         const context = chord.voices.map((s, i) => ({ step: s.step, semi: getAbsSemitone(s), idx: i })).filter(n => n.idx !== idx);
         chord.voices[idx] = Object.assign({}, chord.voices[idx], getVariations((oct * 12) + STEP_TO_SEMI[step] + acc, chord.voices[idx].oct, context)[0]);
         triggerMutation();
     }
 }
 
-function cycleEnharmonic(idx) {
+export function cycleEnharmonic(idx) {
     const chord = appState.chords[appState.activeChordIndex];
+    pushChordUndo();
     const vars = getVariations(getAbsSemitone(chord.voices[idx]), chord.voices[idx].oct, chord.voices.map((s, i) => ({ step: s.step, semi: getAbsSemitone(s), idx: i })).filter(n => n.idx !== idx));
     let curIdx = vars.findIndex(v => v.step === chord.voices[idx].step && v.acc === chord.voices[idx].acc && v.oct === chord.voices[idx].oct);
     chord.voices[idx] = Object.assign({}, chord.voices[idx], vars[(curIdx + 1) % vars.length]);
@@ -223,7 +335,7 @@ function cycleEnharmonic(idx) {
 }
 
 function init() {
-    loadStateFromURL();
+    const resumedExistingDocument = loadStateFromURL();
     syncStateToInputs();
 
     const safeListen = (id, evt, fn) => {
@@ -235,8 +347,9 @@ function init() {
     safeListen('offlineToggle', 'onchange', triggerMutation);
     safeListen('wavChordFile', 'onchange', loadChordFromWav);
     safeListen('legacyVocalToggle', 'onchange', () => {
-        appState.settings.presetVersion = document.getElementById('legacyVocalToggle').checked ? 'legacy' : 'ear';
         const chord = appState.chords[appState.activeChordIndex];
+        if (chord.vowel !== 'custom') pushChordUndo();
+        appState.settings.presetVersion = document.getElementById('legacyVocalToggle').checked ? 'legacy' : 'ear';
         if (chord.vowel !== 'custom') {
             const presets = appState.settings.presetVersion === 'legacy' ? VOWEL_PRESETS_LEGACY : VOWEL_PRESETS_EAR;
             const freqs = presets[chord.vowel];
@@ -258,11 +371,20 @@ function init() {
     safeListen('duration', 'oninput', audioPrefHandler);
     safeListen('volume', 'oninput', audioPrefHandler);
     
-    document.querySelectorAll('input[name="intonation"]').forEach(r => r.onchange = triggerMutation);
-    
+    // Intonation itself isn't a chord field, but flipping it re-derives chord.tuning
+    // asynchronously via fetchAnalysis() -> updateAnalysisResult() at the end of triggerMutation
+    // -- snapshotting here is what lets Ctrl+Z undo "I switched to equal temperament and lost my
+    // custom cents," even though the mutation that actually changes tuning hasn't happened yet
+    // at the point this handler runs.
+    document.querySelectorAll('input[name="intonation"]').forEach(r => r.onchange = () => {
+        pushChordUndo();
+        triggerMutation();
+    });
+
     document.querySelectorAll('input[name="vowel"]').forEach(radio => {
         radio.onchange = () => {
             const chord = appState.chords[appState.activeChordIndex];
+            pushChordUndo();
             chord.vowel = radio.value;
             if (radio.value === 'custom') {
                 const adv = document.getElementById('advDetails');
@@ -312,6 +434,8 @@ function init() {
     safeListen('playBtn', 'onclick', () => playChord(appState.chords[appState.activeChordIndex].voices, appState.chords[appState.activeChordIndex].tuning, getAudioSettings()));
     safeListen('saveBtn', 'onclick', () => saveChordAsWav(appState.chords[appState.activeChordIndex].voices, appState.chords[appState.activeChordIndex].tuning, getAudioSettings()));
     safeListen('shareBtn', 'onclick', generatePermalink);
+    safeListen('undoBtn', 'onclick', undoChordEdit);
+    safeListen('redoBtn', 'onclick', redoChordEdit);
     safeListen('analyzeBtn', 'onclick', async () => {
         const btn = document.getElementById('analyzeBtn');
         btn.disabled = true;
@@ -328,6 +452,11 @@ function init() {
     });
 
     window.addEventListener('inputFocus', (e) => {
+        // The cents field dispatches tuningUpdate on every keystroke (continuous, like a slider
+        // drag), not just on commit -- unlike note-input's onchange, which only fires once. So
+        // the undo snapshot has to happen here, once per edit session at focus-in, rather than
+        // inside the tuningUpdate handler itself (which would push one entry per keystroke).
+        if (e.detail.id && e.detail.id.startsWith('tuning-')) pushChordUndo();
         appState.ui.selectedIdx = e.detail.idx;
         appState.ui.focusedElementId = e.detail.id;
         document.querySelectorAll('.part-ctrl').forEach((c, i) => c.classList.toggle('active', i === appState.ui.selectedIdx));
@@ -343,6 +472,7 @@ function init() {
             if (customInt) customInt.checked = true;
         }
         syncChordToScoreDocument();
+        syncChordToStandaloneDocument();
     });
 
     window.addEventListener('partAudioUpdate', (e) => {
@@ -354,7 +484,22 @@ function init() {
     });
 
     window.addEventListener('keydown', (e) => {
-        handleGlobalKey(e, 
+        // Always runs the app's own undo/redo, deliberately not deferring to native per-field
+        // text undo even while focused in note-input/tuning-input -- those are this app's only
+        // free-text fields, and both are chord fields already captured by the undo stack anyway,
+        // so there's no real "different" undo a native handler would offer here. (An earlier
+        // version tried to detect "genuinely typing" via document.activeElement and defer to
+        // native undo there, but renderUI() re-focuses appState.ui.focusedElementId on every
+        // render -- including the render this very undo call triggers -- so focus routinely
+        // sits in the last-edited field long after the user has moved on to other controls.
+        // Caught live: clicking an intonation radio, then Ctrl+Z, silently did nothing because
+        // focus had already been steered back into the cents field from the edit before it.)
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+            e.preventDefault();
+            if (e.shiftKey) redoChordEdit(); else undoChordEdit();
+            return;
+        }
+        handleGlobalKey(e,
             { selectedIdx: appState.ui.selectedIdx, isTyping: document.activeElement.tagName === 'INPUT' },
             {
                 updateNote, cycleEnharmonic, renderUI,
@@ -372,7 +517,15 @@ function init() {
     });
 
     renderUI();
-    fetchAnalysis();
+    // On a truly fresh bare visit (nothing to resume), the initial analysis pass's own real
+    // tuning computation would otherwise sync into chord:current with no baseline, reading as
+    // "unsaved changes" before the user has done anything -- establish it as the baseline instead,
+    // once, right after this first pass settles.
+    fetchAnalysis().then(() => {
+        if (!resumedExistingDocument) establishFreshChordBaseline();
+        bootstrapping = false;
+        updateDocStrip();
+    });
 }
 
 if (document.readyState === 'loading') {

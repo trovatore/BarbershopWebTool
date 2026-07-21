@@ -30,6 +30,14 @@
         .editing-label.live { color: #007bff; font-weight: bold; }
         .editing-label.error { color: #c0392b; }
 
+        .doc-strip { display: flex; align-items: center; gap: 10px; font-size: 0.75rem; margin-bottom: 12px; }
+        .doc-label { color: #888; }
+        .doc-strip .dirty-indicator { color: #a15c00; font-weight: bold; }
+        .strip-btn { padding: 3px 9px; font-size: 0.75rem; border-radius: 4px; }
+        .strip-btn:disabled { opacity: 0.4; cursor: default; }
+        .strip-nav-link { margin-left: auto; color: #007bff; text-decoration: none; }
+        .strip-nav-link:hover { text-decoration: underline; }
+
         .play-btn { background: #28a745; color: white; border: none; padding: 10px 20px; border-radius: 8px; font-size: 1rem; display: flex; align-items: center; gap: 8px; transition: background 0.2s; cursor: pointer; }
         .play-btn:hover { background: #218838; }
         .save-btn { background: #6c757d; color: white; border: none; padding: 10px 20px; border-radius: 8px; font-size: 1rem; display: flex; align-items: center; gap: 8px; transition: background 0.2s; cursor: pointer; }
@@ -59,6 +67,13 @@
     <div id="manifest" class="manifest"></div>
     <h1 style="margin-top:0; font-size: 1.1rem; color: #666;">Barbershop Chord Calculator</h1>
     <div id="editingLabel" class="editing-label"></div>
+    <div id="docStrip" class="doc-strip">
+        <span id="docLabel" class="doc-label"></span>
+        <span id="docDirtyIndicator" class="dirty-indicator"></span>
+        <button id="undoBtn" class="strip-btn" title="Undo (Ctrl+Z)">↶ Undo</button>
+        <button id="redoBtn" class="strip-btn" title="Redo (Ctrl+Shift+Z)">↷ Redo</button>
+        <a href="score/" class="strip-nav-link">Score page →</a>
+    </div>
     <div id="notation-container"><div id="notation"></div></div>
     <div class="controls"></div>
 

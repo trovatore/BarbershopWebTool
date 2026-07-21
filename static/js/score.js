@@ -19,6 +19,7 @@ import { createDocumentStore } from './document-store.js';
     const warningsEl = document.getElementById('warnings');
     const chordsEl = document.getElementById('chords');
     const dirtyIndicatorEl = document.getElementById('dirtyIndicator');
+    const docLabelEl = document.getElementById('docLabel');
 
     // One store instance for this tab, tracking score:current's dirty state (against the last
     // import/export, not against the continuous autosave below) and holding a document-level
@@ -32,7 +33,11 @@ import { createDocumentStore } from './document-store.js';
         return { chords: doc.chords, metadata: doc.metadata };
     }
 
-    function updateDirtyIndicator() {
+    // Document label + dirty indicator (plan.md §10.7.5) -- no Undo/Redo here, deliberately: the
+    // only Score-level mutation is import, and §10.7.9 resolved not to build undo-of-import,
+    // just the confirm-before-discard guard below. Per-chord undo lives on the Chord-editor side.
+    function updateDocStrip() {
+        if (docLabelEl) docLabelEl.textContent = (currentDoc && currentDoc.sourceLabel) || 'No file loaded';
         if (!dirtyIndicatorEl) return;
         const dirty = !!currentDoc && scoreStore.isDirty({
             content: scoreContent(currentDoc),
@@ -172,6 +177,16 @@ import { createDocumentStore } from './document-store.js';
         }
         const file = fileInput.files[0];
         if (!file) return;
+
+        // Confirm before silently discarding unsaved edits (resolved 2026-07-20: prompting here
+        // is enough, no separate "undo the import" mechanism needed on top of it -- plan.md
+        // §10.7.7/§10.7.8). scoreStore.markImported() would otherwise wipe them with no way back.
+        if (currentDoc && scoreStore.isDirty({ content: scoreContent(currentDoc), sourceSnapshot: currentDoc.sourceSnapshot }) &&
+            !window.confirm('This will replace your current score, which has unsaved changes. Load the new file anyway and discard them?')) {
+            fileInput.value = '';
+            return;
+        }
+
         try {
             currentXml = await file.text();
             currentResult = WebApi.importSummary(currentXml);
@@ -193,7 +208,7 @@ import { createDocumentStore } from './document-store.js';
             currentDoc.updatedAt = importSnap.updatedAt;
             writeScoreDocument(currentDoc);
             render();
-            updateDirtyIndicator();
+            updateDocStrip();
             exportBtn.disabled = false;
             setStatus(`Loaded ${file.name} (${currentDoc.chords.length} chords) — click "Edit" on a row to open it.`);
         } catch (e) {
@@ -201,7 +216,7 @@ import { createDocumentStore } from './document-store.js';
             currentDoc = null;
             setStatus('Import failed: ' + e.message, true);
             exportBtn.disabled = true;
-            updateDirtyIndicator();
+            updateDocStrip();
         }
     };
 
@@ -213,7 +228,7 @@ import { createDocumentStore } from './document-store.js';
         if (e.key !== SCORE_STORAGE_KEY || !currentDoc) return;
         currentDoc = readScoreDocument();
         render();
-        updateDirtyIndicator();
+        updateDocStrip();
         setStatus('Score updated from another tab.');
     });
 
@@ -262,7 +277,7 @@ import { createDocumentStore } from './document-store.js';
             currentDoc.sourceSnapshot = exportSnap.sourceSnapshot;
             currentDoc.updatedAt = exportSnap.updatedAt;
             writeScoreDocument(currentDoc);
-            updateDirtyIndicator();
+            updateDocStrip();
             setStatus('Exported current edits to reexported.musicxml.');
         } catch (e) {
             setStatus('Export failed: ' + e.message, true);
