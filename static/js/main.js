@@ -2,7 +2,7 @@
 import { getAbsSemitone, getVariations, STR_TO_ACC, STEP_TO_SEMI, SERIAL as S_SPEL } from './spelling.js';
 import { renderControls, handleGlobalKey, SERIAL as S_UI } from './ui-controls.js';
 import { drawChord, SERIAL as S_NOT } from './notation.js';
-import { playChord, saveChordAsWav, analyzeAndShow, SERIAL as S_AUD } from './audio.js';
+import { playChord, saveChordAsWav, analyzeAndShow, primeAudioContext, SERIAL as S_AUD } from './audio.js';
 import { analyzeChord, SERIAL as S_THY } from './theory.js';
 import { appState, syncInputsToState, syncStateToInputs, loadStateFromURL, generatePermalink, getNoteString, syncChordToScoreDocument, syncChordToStandaloneDocument, isScoreDocumentDirty, isChordDocumentDirty, establishFreshChordBaseline, VOWEL_PRESETS_LEGACY, VOWEL_PRESETS_EAR } from './state.js';
 import { createDocumentStore } from './document-store.js';
@@ -444,6 +444,11 @@ function init() {
             finally { btn.disabled = false; }
         }, 50);
     });
+
+    // Best-effort audio-context warm-up on the page's first gesture (plan.md §10.5.2's fix,
+    // applied here too -- same latent resume() latency exists on this page's own Play button,
+    // just less noticeable against a multi-second flat duration than /score's short chords).
+    window.addEventListener('pointerdown', primeAudioContext, { once: true, capture: true });
 
     window.addEventListener('selectPart', (e) => {
         appState.ui.selectedIdx = e.detail;

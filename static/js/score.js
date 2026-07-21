@@ -8,7 +8,13 @@ import { writeScoreDocument, readScoreDocument, newChordId, SCORE_STORAGE_KEY } 
 import { VOWEL_PRESETS_EAR, getNoteString } from './state.js';
 import { createDocumentStore } from './document-store.js';
 import { analyzeChord } from './theory.js';
-import { playScore, stopScorePlayback, saveScoreAsWav } from './audio.js';
+import { playScore, stopScorePlayback, saveScoreAsWav, primeAudioContext } from './audio.js';
+
+// Best-effort warm-up on the page's first genuine user gesture (any click/keypress/etc, not
+// necessarily on a playback control) -- see primeAudioContext()'s own doc comment in audio.js.
+// Hides most of the real several-second resume() latency by starting it in the background while
+// the user is still choosing a file / looking over the loaded score, well before they click Play.
+window.addEventListener('pointerdown', primeAudioContext, { once: true, capture: true });
 
 // Fixed vibrato/formant-Q defaults, matching state.js's appState.settings.audio -- the Chord
 // page's own knobs for these -- since /score has no equivalent UI (plan.md §10.5 only asked for
@@ -393,16 +399,31 @@ const SCORE_AUDIO_DEFAULTS = {
     playScoreBtn.onclick = async () => {
         if (!currentDoc || !currentDoc.chords.length) return;
         const bpm = parseFloat(scoreBpmEl.value) || 120;
-        stopScorePlayback(); // in case a previous playback is still ringing out
+        // Only actually stop/close if something is currently playing (stopScoreBtn's disabled
+        // state is a reliable proxy for that) -- unconditionally calling stopScorePlayback() here
+        // was closing and discarding *any* existing context, including one primeAudioContext()
+        // had already warmed up on the page's first click, forcing a cold recreation right before
+        // scheduling and defeating priming's whole purpose on exactly the case it matters most
+        // for: the first Play click of the session.
+        if (!stopScoreBtn.disabled) stopScorePlayback();
         setPlaybackButtonsEnabled(false);
         stopScoreBtn.disabled = false;
-        // playScore() awaits audioCtx.resume() internally before scheduling anything -- on a
-        // freshly created/suspended context that can take a real, noticeable moment (confirmed
-        // live testing), which is what made the first few chords land silently/late. Reflect
-        // that wait in the status instead of claiming "Playing" before anything's actually
-        // scheduled.
+        // playScore() properly awaits the audio context becoming ready before scheduling anything
+        // -- on a freshly created/suspended context that can take several real seconds (confirmed
+        // against a real recording), which is what made the first several chords land dead silent
+        // rather than just quiet. Reflect that wait in the status instead of claiming "Playing"
+        // before anything's actually scheduled.
         scorePlaybackStatusEl.textContent = 'Starting…';
-        const totalSeconds = await playScore(currentDoc.chords, bpm, readMixer(), SCORE_AUDIO_DEFAULTS);
+        let totalSeconds;
+        try {
+            totalSeconds = await playScore(currentDoc.chords, bpm, readMixer(), SCORE_AUDIO_DEFAULTS);
+        } catch (e) {
+            scorePlaybackStatusEl.textContent = '';
+            setStatus('Playback failed: ' + e.message, true);
+            setPlaybackButtonsEnabled(true);
+            stopScoreBtn.disabled = true;
+            return;
+        }
         scorePlaybackStatusEl.textContent = `Playing (${totalSeconds.toFixed(1)}s)…`;
         clearTimeout(playbackResetTimer);
         playbackResetTimer = setTimeout(() => {

@@ -149,34 +149,41 @@ function setupAudioGraph(ctx, chordState, startTime, duration, tuningData, opts,
     if (!multiChannel) compressor.connect(ctx.destination);
 }
 
-// Un-awaited resume() is the actual root cause of "the first bit of playback is silent/late"
-// (confirmed live, not just theorized: resume() on a freshly created/suspended context can take
-// a real, non-trivial amount of wall-clock time to actually resolve -- if scheduling starts
-// against currentTime *before* that resolves, the schedule's whole timeline baseline is computed
-// against a context that isn't actually running yet, and everything scheduled ends up starting
-// late/clipped relative to when audio truly begins flowing. Awaiting it first, plus a small fixed
-// lead-in for the brief residual latency even a freshly-"running" context still has, fixes both
-// playChord (single chord) and playScore (whole score, where it's far more noticeable -- several
-// short chords can fall entirely within the gap). See audio.js's playScore for the score version.
+// currentTime is frozen for the entire time a context is 'suspended' and only resumes ticking
+// once it's genuinely 'running' again -- it does not jump forward to account for the suspension.
+// Scheduling from currentTime before resume() has actually settled captures a stale baseline, so
+// everything scheduled against it is already "in the past" the instant the context wakes up and
+// gets silently skipped. ensureRunning() below always waits out the real resume() rather than
+// giving up early on a timeout and scheduling anyway -- only times out to report a genuine
+// failure. See primeAudioContext() for hiding that latency instead of waiting through it inline.
 const PLAYBACK_LEAD_IN = 0.05;
+const RESUME_TIMEOUT_MS = 10000;
 
-// resume() isn't just occasionally slow -- confirmed live (in this dev/test environment) that it
-// can fail to resolve *at all*, seemingly indefinitely. Awaiting it unconditionally would trade
-// "first few chords quiet" for a strictly worse failure mode: playback permanently stuck on
-// "Starting…" with no way to recover short of reloading the page. Race it against a timeout
-// instead -- get the accurate-scheduling benefit when resume() behaves, but never block forever
-// when it doesn't. 1.5s is generous for the resume() itself normally taking well under that.
-function resumeWithTimeout(ctx, timeoutMs = 1500) {
-    if (ctx.state !== 'suspended') return Promise.resolve();
-    return Promise.race([
-        ctx.resume(),
-        new Promise(resolve => setTimeout(resolve, timeoutMs)),
+async function ensureRunning(ctx) {
+    if (ctx.state !== 'suspended') return;
+    const result = await Promise.race([
+        ctx.resume().then(() => 'resumed'),
+        new Promise(resolve => setTimeout(() => resolve('timeout'), RESUME_TIMEOUT_MS)),
     ]);
+    if (result === 'timeout') {
+        throw new Error('Audio did not start in time -- try again, or reload the page if it keeps happening.');
+    }
+}
+
+// Best-effort, fire-and-forget: creates (and starts resuming) the shared AudioContext on the
+// page's first genuine user gesture, well before Play is actually clicked, so any resume()
+// latency happens in the background while the user is still looking at the loaded score/
+// adjusting settings, instead of being fully in the way the moment they hit Play. Safe to call
+// redundantly -- playChord/playScore still properly await readiness themselves regardless of
+// whether this warm-up finished, this purely improves perceived latency, changes no behavior.
+export function primeAudioContext() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
 }
 
 export async function playChord(chordState, tuningData, opts) {
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    await resumeWithTimeout(audioCtx);
+    await ensureRunning(audioCtx);
     setupAudioGraph(audioCtx, chordState, audioCtx.currentTime + PLAYBACK_LEAD_IN, opts.duration, tuningData, opts);
 }
 
@@ -231,23 +238,46 @@ function buildScoreSchedule(chords, bpm) {
 // exported file, distinct from any chord/part's own settings. Each chord's own vowel formants
 // (f1/f2/f3) are used as-is -- unlike the single-chord page, a score chord already carries its
 // own real vowel, no global override needed.
+//
+// Building every chord's audio graph in one synchronous loop up front disrupts real-time output:
+// at vps=4, a 16-chord score is on the order of 2500 individual WebAudio nodes (16 chords x 4
+// parts x 4 voices-per-part x ~10 nodes/voice), and connecting all of them to an already-live
+// graph in a single burst audibly glitches audio that's already playing -- below what Web Audio's
+// own JS-visible clock (currentTime) can see, so it can't be detected from JS. Staggering each
+// chord's node construction across the actual playback timeline (via setTimeout, built shortly
+// before it's due) keeps any single moment's new-node count to roughly one chord's worth instead
+// of the whole score's.
+const CHORD_BUILD_LOOKAHEAD_SECONDS = 0.3;
+let pendingChordBuilds = [];
+
 export async function playScore(chords, bpm, mixer, baseOpts) {
+    pendingChordBuilds.forEach(id => clearTimeout(id));
+    pendingChordBuilds = [];
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    await resumeWithTimeout(audioCtx);
+    await ensureRunning(audioCtx);
     const partSettings = mixer.map(m => ({ volume: m.volume, mute: m.mute }));
     const { scheduled, totalSeconds } = buildScoreSchedule(chords, bpm);
     const startAt = audioCtx.currentTime + PLAYBACK_LEAD_IN;
     scheduled.forEach(({ chord, start, duration }) => {
-        setupAudioGraph(audioCtx, chord.voices, startAt + start, duration, chord.tuning, {
-            ...baseOpts, ...chord.formants, partSettings,
-        });
+        const buildAtCtxTime = startAt + start - CHORD_BUILD_LOOKAHEAD_SECONDS;
+        const delayMs = Math.max(0, (buildAtCtxTime - audioCtx.currentTime) * 1000);
+        const id = setTimeout(() => {
+            setupAudioGraph(audioCtx, chord.voices, startAt + start, duration, chord.tuning, {
+                ...baseOpts, ...chord.formants, partSettings,
+            });
+        }, delayMs);
+        pendingChordBuilds.push(id);
     });
     return totalSeconds + PLAYBACK_LEAD_IN;
 }
 
 // Closing the context stops every currently-scheduled node at once -- WebAudio has no single
 // "cancel everything I scheduled" call otherwise. The next playScore() call creates a fresh one.
+// Also cancels any not-yet-fired staggered chord-build timers so a chord can't get built (and
+// briefly play) after the user has explicitly stopped playback.
 export function stopScorePlayback() {
+    pendingChordBuilds.forEach(id => clearTimeout(id));
+    pendingChordBuilds = [];
     if (audioCtx) {
         audioCtx.close();
         audioCtx = null;
