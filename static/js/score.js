@@ -390,13 +390,19 @@ const SCORE_AUDIO_DEFAULTS = {
     // BPM field, plays every chord back to back through the same synthesis engine the Chord page
     // uses. The 4-part mix/mute is playback-only -- read fresh from the sliders, never written to
     // score:current or the exported file.
-    playScoreBtn.onclick = () => {
+    playScoreBtn.onclick = async () => {
         if (!currentDoc || !currentDoc.chords.length) return;
         const bpm = parseFloat(scoreBpmEl.value) || 120;
         stopScorePlayback(); // in case a previous playback is still ringing out
-        const totalSeconds = playScore(currentDoc.chords, bpm, readMixer(), SCORE_AUDIO_DEFAULTS);
         setPlaybackButtonsEnabled(false);
         stopScoreBtn.disabled = false;
+        // playScore() awaits audioCtx.resume() internally before scheduling anything -- on a
+        // freshly created/suspended context that can take a real, noticeable moment (confirmed
+        // live testing), which is what made the first few chords land silently/late. Reflect
+        // that wait in the status instead of claiming "Playing" before anything's actually
+        // scheduled.
+        scorePlaybackStatusEl.textContent = 'Starting…';
+        const totalSeconds = await playScore(currentDoc.chords, bpm, readMixer(), SCORE_AUDIO_DEFAULTS);
         scorePlaybackStatusEl.textContent = `Playing (${totalSeconds.toFixed(1)}s)…`;
         clearTimeout(playbackResetTimer);
         playbackResetTimer = setTimeout(() => {

@@ -149,10 +149,35 @@ function setupAudioGraph(ctx, chordState, startTime, duration, tuningData, opts,
     if (!multiChannel) compressor.connect(ctx.destination);
 }
 
-export function playChord(chordState, tuningData, opts) {
+// Un-awaited resume() is the actual root cause of "the first bit of playback is silent/late"
+// (confirmed live, not just theorized: resume() on a freshly created/suspended context can take
+// a real, non-trivial amount of wall-clock time to actually resolve -- if scheduling starts
+// against currentTime *before* that resolves, the schedule's whole timeline baseline is computed
+// against a context that isn't actually running yet, and everything scheduled ends up starting
+// late/clipped relative to when audio truly begins flowing. Awaiting it first, plus a small fixed
+// lead-in for the brief residual latency even a freshly-"running" context still has, fixes both
+// playChord (single chord) and playScore (whole score, where it's far more noticeable -- several
+// short chords can fall entirely within the gap). See audio.js's playScore for the score version.
+const PLAYBACK_LEAD_IN = 0.05;
+
+// resume() isn't just occasionally slow -- confirmed live (in this dev/test environment) that it
+// can fail to resolve *at all*, seemingly indefinitely. Awaiting it unconditionally would trade
+// "first few chords quiet" for a strictly worse failure mode: playback permanently stuck on
+// "Starting…" with no way to recover short of reloading the page. Race it against a timeout
+// instead -- get the accurate-scheduling benefit when resume() behaves, but never block forever
+// when it doesn't. 1.5s is generous for the resume() itself normally taking well under that.
+function resumeWithTimeout(ctx, timeoutMs = 1500) {
+    if (ctx.state !== 'suspended') return Promise.resolve();
+    return Promise.race([
+        ctx.resume(),
+        new Promise(resolve => setTimeout(resolve, timeoutMs)),
+    ]);
+}
+
+export async function playChord(chordState, tuningData, opts) {
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    if (audioCtx.state === 'suspended') audioCtx.resume();
-    setupAudioGraph(audioCtx, chordState, audioCtx.currentTime, opts.duration, tuningData, opts);
+    await resumeWithTimeout(audioCtx);
+    setupAudioGraph(audioCtx, chordState, audioCtx.currentTime + PLAYBACK_LEAD_IN, opts.duration, tuningData, opts);
 }
 
 export async function saveChordAsWav(chordState, tuningData, opts) {
@@ -206,18 +231,18 @@ function buildScoreSchedule(chords, bpm) {
 // exported file, distinct from any chord/part's own settings. Each chord's own vowel formants
 // (f1/f2/f3) are used as-is -- unlike the single-chord page, a score chord already carries its
 // own real vowel, no global override needed.
-export function playScore(chords, bpm, mixer, baseOpts) {
+export async function playScore(chords, bpm, mixer, baseOpts) {
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    if (audioCtx.state === 'suspended') audioCtx.resume();
+    await resumeWithTimeout(audioCtx);
     const partSettings = mixer.map(m => ({ volume: m.volume, mute: m.mute }));
     const { scheduled, totalSeconds } = buildScoreSchedule(chords, bpm);
-    const startAt = audioCtx.currentTime;
+    const startAt = audioCtx.currentTime + PLAYBACK_LEAD_IN;
     scheduled.forEach(({ chord, start, duration }) => {
         setupAudioGraph(audioCtx, chord.voices, startAt + start, duration, chord.tuning, {
             ...baseOpts, ...chord.formants, partSettings,
         });
     });
-    return totalSeconds;
+    return totalSeconds + PLAYBACK_LEAD_IN;
 }
 
 // Closing the context stops every currently-scheduled node at once -- WebAudio has no single
