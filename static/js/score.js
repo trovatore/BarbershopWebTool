@@ -114,6 +114,20 @@ import { analyzeChord } from './theory.js';
         return v.step.toUpperCase() + (ACC_TO_STR[v.acc] || '') + v.oct;
     }
 
+    // Cents are shown alongside each note so a retune/edit is actually visible in the table, not
+    // just in the underlying data (Mike, 2026-07-20) -- same +/- convention as the Chord editor's
+    // own tuning-input display. Skipped for a rest ("–") or when there's no cents value to show.
+    function appendCents(noteStr, cents) {
+        if (!noteStr || noteStr === '–' || cents === undefined || cents === null) return noteStr;
+        return `${noteStr} (${cents > 0 ? '+' + cents : cents})`;
+    }
+
+    // Single value per chord (vowel is chord-level, not per-voice) -- a dash for "custom" keeps
+    // the column narrow, since the actual formant numbers aren't worth the table space here.
+    function vowelDisplayString(vowelKey) {
+        return (!vowelKey || vowelKey === 'custom') ? '—' : vowelKey;
+    }
+
     function escapeHtml(s) {
         return String(s).replace(/[&<>"']/g, ch => ({
             '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -143,7 +157,7 @@ import { analyzeChord } from './theory.js';
         const docChords = currentDoc ? currentDoc.chords : null;
         result.chords.forEach((c, i) => {
             while (boundaryIdx < boundaries.length - 1 && pos >= boundaries[boundaryIdx] - EPS) {
-                rows.push(`<tr class="measure-row"><td colspan="8">Measure ${boundaryIdx + 1}</td></tr>`);
+                rows.push(`<tr class="measure-row"><td colspan="9">Measure ${boundaryIdx + 1}</td></tr>`);
                 boundaryIdx++;
             }
             // If this score has been saved for editing, prefer the live voices out of
@@ -151,17 +165,19 @@ import { analyzeChord } from './theory.js';
             // (§10.2 slice 2). The chord *name* isn't re-derived here (that needs a real
             // analysis pass, not just a display concern) so it can go stale after an edit.
             const docChord = docChords ? docChords[i] : null;
-            const tenor = docChord ? voiceDisplayString(docChord.voices[3]) : c.tenor;
-            const lead = docChord ? voiceDisplayString(docChord.voices[2]) : c.lead;
-            const bari = docChord ? voiceDisplayString(docChord.voices[1]) : c.bari;
-            const bass = docChord ? voiceDisplayString(docChord.voices[0]) : c.bass;
+            const tenor = appendCents(docChord ? voiceDisplayString(docChord.voices[3]) : c.tenor, docChord ? docChord.tuning[3] : c.tenorCents);
+            const lead = appendCents(docChord ? voiceDisplayString(docChord.voices[2]) : c.lead, docChord ? docChord.tuning[2] : c.leadCents);
+            const bari = appendCents(docChord ? voiceDisplayString(docChord.voices[1]) : c.bari, docChord ? docChord.tuning[1] : c.bariCents);
+            const bass = appendCents(docChord ? voiceDisplayString(docChord.voices[0]) : c.bass, docChord ? docChord.tuning[0] : c.bassCents);
+            const vowel = vowelDisplayString(docChord ? docChord.vowel : c.vowelKey);
             const editLink = docChord
                 ? `<a href="../?sid=${encodeURIComponent(docChord.id)}" target="_blank">Edit</a>`
                 : '';
             rows.push(`<tr>
                 <td>${i}</td><td>${c.beats}</td><td>${escapeHtml(c.name)}</td>
-                <td>${escapeHtml(tenor)}</td><td>${escapeHtml(lead)}</td>
-                <td>${escapeHtml(bari)}</td><td>${escapeHtml(bass)}</td>
+                <td class="vowel-col">${escapeHtml(vowel)}</td>
+                <td class="cents-note">${escapeHtml(tenor)}</td><td class="cents-note">${escapeHtml(lead)}</td>
+                <td class="cents-note">${escapeHtml(bari)}</td><td class="cents-note">${escapeHtml(bass)}</td>
                 <td>${editLink}</td>
             </tr>`);
             pos += c.beats;

@@ -23,6 +23,8 @@
         table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
         th, td { border-bottom: 1px solid #eee; padding: 6px 8px; text-align: left; }
         th { color: #666; }
+        .vowel-col { width: 2.5em; text-align: center; }
+        .cents-note { white-space: nowrap; }
         tr.measure-row td { background: #f5f6f8; color: #888; font-size: 0.75rem; font-weight: bold; padding: 3px 8px; border-bottom: 1px solid #e1e4e8; }
     </style>
 </head>
@@ -66,7 +68,7 @@
     <div id="warnings"></div>
     <table>
         <thead>
-            <tr><th>#</th><th>Beats</th><th>Name</th><th>Tenor</th><th>Lead</th><th>Bari</th><th>Bass</th><th></th></tr>
+            <tr><th>#</th><th>Beats</th><th>Name</th><th class="vowel-col">Vowel</th><th>Tenor</th><th>Lead</th><th>Bari</th><th>Bass</th><th></th></tr>
         </thead>
         <tbody id="chords"></tbody>
     </table>
