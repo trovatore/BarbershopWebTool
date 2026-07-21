@@ -15,6 +15,7 @@
         #dirtyIndicator { font-size: 0.85rem; color: #a15c00; font-weight: bold; }
         .doc-strip { font-size: 0.8rem; }
         #docLabel { color: #888; }
+        .strip-btn { padding: 3px 9px; font-size: 0.75rem; border-radius: 4px; font-weight: normal; }
         .strip-nav-link { margin-left: auto; color: #007bff; text-decoration: none; }
         .strip-nav-link:hover { text-decoration: underline; }
         #summary { font-size: 0.9rem; color: #333; margin-bottom: 10px; }
@@ -23,6 +24,9 @@
         th, td { border-bottom: 1px solid #eee; padding: 6px 8px; text-align: left; }
         th { color: #666; }
         .vowel-col { width: 2.5em; text-align: center; }
+        .vowel-editable { cursor: pointer; }
+        .vowel-editable:hover { background: #f5f6f8; text-decoration: underline dotted; }
+        .vowel-picker { font-size: 0.85rem; }
         .cents-note { white-space: nowrap; }
         tr.measure-row td { background: #f5f6f8; color: #888; font-size: 0.75rem; font-weight: bold; padding: 3px 8px; border-bottom: 1px solid #e1e4e8; }
     </style>
@@ -33,6 +37,8 @@
     <div class="row doc-strip">
         <span id="docLabel">No file loaded</span>
         <span id="dirtyIndicator"></span>
+        <button id="undoBtn" class="strip-btn" disabled title="Undo (Ctrl+Z)">↶ Undo</button>
+        <button id="redoBtn" class="strip-btn" disabled title="Redo (Ctrl+Shift+Z)">↷ Redo</button>
         <a href="../" class="strip-nav-link">← Chord page</a>
     </div>
     <div class="row">

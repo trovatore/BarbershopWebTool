@@ -48,6 +48,8 @@ const SCORE_AUDIO_DEFAULTS = {
     const chordsEl = document.getElementById('chords');
     const dirtyIndicatorEl = document.getElementById('dirtyIndicator');
     const docLabelEl = document.getElementById('docLabel');
+    const undoBtn = document.getElementById('undoBtn');
+    const redoBtn = document.getElementById('redoBtn');
     let playbackResetTimer = null;
 
     // [{volume, mute}, ...] indexed Bass/Bari/Lead/Tenor, matching VOICE_ORDER below -- read
@@ -72,16 +74,17 @@ const SCORE_AUDIO_DEFAULTS = {
     // {chords, metadata, updatedAt} shape for compatibility with syncChordToScoreDocument() and
     // the storage-event listener below -- sourceLabel/sourceSnapshot just ride along as extra
     // sibling fields rather than nesting the whole doc under the store's own {content, ...} shape.
-    const scoreStore = createDocumentStore(SCORE_STORAGE_KEY);
+    // persistHistory: true (plan.md §10.8.4) -- /score is a view onto a real, revisited-over-time
+    // document, not a disposable tab session (unlike main.js's chordUndoStore for a ?sid= tab,
+    // which is deliberately NOT persisted -- see that file's own comment on why), so its undo
+    // stack should survive navigating away and back the same way the dirty flag already does.
+    const scoreStore = createDocumentStore(SCORE_STORAGE_KEY, { persistHistory: true });
 
     function scoreContent(doc) {
         return { chords: doc.chords, metadata: doc.metadata };
     }
 
-    // Document label + dirty indicator (plan.md §10.7.5) -- no Undo/Redo here, deliberately: the
-    // two Score-level mutations (import, bulk re-tune below) both get a confirm-before-discard/
-    // -overwrite guard instead, matching §10.7.9's resolution that a prompt is protection enough
-    // without a separate undo mechanism. Per-chord undo lives on the Chord-editor side.
+    // Document label + dirty indicator (plan.md §10.7.5).
     function updateDocStrip() {
         if (docLabelEl) docLabelEl.textContent = (currentDoc && currentDoc.sourceLabel) || 'No file loaded';
         if (!dirtyIndicatorEl) return;
@@ -91,6 +94,61 @@ const SCORE_AUDIO_DEFAULTS = {
         });
         dirtyIndicatorEl.textContent = dirty ? '● Unsaved changes' : '';
     }
+
+    // Document-level Undo/Redo (built 2026-07-21, plan.md §10.8.3): reuses scoreStore's own
+    // undo/redo stack rather than a separate scratch instance (unlike main.js's chordUndoStore,
+    // which has to be separate since it covers both the standalone chord:current document and a
+    // live ?sid= Score-chord edit -- two different documents, neither of which /score itself is).
+    // score:current is the only document /score ever mutates, so reusing scoreStore gets the
+    // "importing a new file wipes old undo history" behavior for free from markImported() (per
+    // §10.7.9 -- Mike's call was specifically no undo-*of*-import, not no undo at all; an import
+    // still correctly can't be undone, since markImported() clears the stack same as it always
+    // has). Covers bulk re-tune and the vowel picker; import/export themselves are never pushed.
+    function pushDocUndo() {
+        scoreStore.pushUndo(scoreContent(currentDoc));
+    }
+
+    function applyDocContent(content) {
+        currentDoc.chords = content.chords;
+        currentDoc.metadata = content.metadata;
+        currentDoc.updatedAt = Date.now();
+        writeScoreDocument(currentDoc);
+        render();
+        updateDocStrip();
+        updateUndoRedoButtons();
+    }
+
+    function updateUndoRedoButtons() {
+        if (undoBtn) undoBtn.disabled = !currentDoc || !scoreStore.canUndo();
+        if (redoBtn) redoBtn.disabled = !currentDoc || !scoreStore.canRedo();
+    }
+
+    if (undoBtn) undoBtn.onclick = () => {
+        if (!currentDoc) return;
+        const restored = scoreStore.undo(scoreContent(currentDoc));
+        if (!restored) return;
+        applyDocContent(restored);
+        setStatus('Undid last change.');
+    };
+
+    if (redoBtn) redoBtn.onclick = () => {
+        if (!currentDoc) return;
+        const restored = scoreStore.redo(scoreContent(currentDoc));
+        if (!restored) return;
+        applyDocContent(restored);
+        setStatus('Redid last undone change.');
+    };
+
+    // Always runs this page's own undo/redo on Ctrl+Z/Ctrl+Shift+Z, same reasoning as main.js's
+    // identical choice not to special-case focus/native text-field undo (see its own comment) --
+    // /score has no free-text field where that distinction would matter anyway (Tempo is the only
+    // text input, and it isn't part of the document/undo stack at all).
+    window.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+            e.preventDefault();
+            if (e.shiftKey) { if (redoBtn) redoBtn.onclick(); } else { if (undoBtn) undoBtn.onclick(); }
+        }
+    });
 
     let currentXml = null;
     let currentResult = null;
@@ -214,9 +272,17 @@ const SCORE_AUDIO_DEFAULTS = {
             const editLink = docChord
                 ? `<a href="../?sid=${encodeURIComponent(docChord.id)}" target="_blank">Edit</a>`
                 : '';
+            // Click-to-edit picker (plan.md §10.2's item 7): a lighter way to change just the
+            // vowel without opening the full Chord editor -- only wired up when docChord exists
+            // (i.e. there's a live score:current entry to write back into), which in practice is
+            // always true once a file's been loaded, since loading both imports and starts
+            // editing in one step (see fileInput.onchange above).
+            const vowelTd = docChord
+                ? `<td class="vowel-col vowel-editable" data-idx="${i}" title="Click to change vowel">${escapeHtml(vowel)}</td>`
+                : `<td class="vowel-col">${escapeHtml(vowel)}</td>`;
             rows.push(`<tr>
                 <td>${i}</td><td>${c.beats}</td><td>${escapeHtml(c.name)}</td>
-                <td class="vowel-col">${escapeHtml(vowel)}</td>
+                ${vowelTd}
                 <td class="cents-note">${escapeHtml(tenor)}</td><td class="cents-note">${escapeHtml(lead)}</td>
                 <td class="cents-note">${escapeHtml(bari)}</td><td class="cents-note">${escapeHtml(bass)}</td>
                 <td>${editLink}</td>
@@ -225,6 +291,61 @@ const SCORE_AUDIO_DEFAULTS = {
         });
         chordsEl.innerHTML = rows.join('');
     }
+
+    // Inline vowel picker (plan.md §10.2's item 7, built 2026-07-21): clicking a chord's vowel
+    // cell swaps it for a <select> of the same 18 presets the Chord page's own radio buttons
+    // offer, so a vowel-only tweak doesn't require opening the full editor in a new tab. "custom"
+    // is shown (disabled) when that's the chord's current vowel, so the cell still reflects real
+    // state, but isn't selectable here -- editing a custom vowel's actual f1/f2/f3 numbers still
+    // needs the full Chord editor, this picker only knows about the fixed preset table.
+    function vowelOptionsHtml(selectedKey) {
+        let html = Object.keys(VOWEL_PRESETS_EAR)
+            .map(k => `<option value="${k}"${k === selectedKey ? ' selected' : ''}>[${k}]</option>`)
+            .join('');
+        if (selectedKey === 'custom') {
+            html += '<option value="custom" selected disabled>custom</option>';
+        }
+        return html;
+    }
+
+    function openVowelPicker(td, idx) {
+        const chord = currentDoc.chords[idx];
+        const select = document.createElement('select');
+        select.className = 'vowel-picker';
+        select.innerHTML = vowelOptionsHtml(chord.vowel);
+        td.textContent = '';
+        td.appendChild(select);
+        select.focus();
+
+        // Applies on change and leaves the cell in a normal (non-editing) state either way --
+        // re-rendering after a plain blur-with-no-change just puts the same display text back.
+        select.addEventListener('change', () => {
+            const key = select.value;
+            const preset = VOWEL_PRESETS_EAR[key];
+            if (!preset) return; // "custom" is disabled, shouldn't be reachable via change
+            pushDocUndo();
+            chord.vowel = key;
+            chord.formants = { f1: preset[0], f2: preset[1], f3: preset[2] };
+            currentDoc.updatedAt = Date.now();
+            writeScoreDocument(currentDoc);
+            updateDocStrip();
+            updateUndoRedoButtons();
+            setStatus(`Chord ${idx}: vowel set to [${key}].`);
+            render();
+        });
+        select.addEventListener('blur', () => render());
+    }
+
+    // Delegated (rows are fully replaced on every render(), so per-row listeners would be lost) --
+    // guards against re-opening a picker that's already open (the select itself is inside the same
+    // <td>, so a click to open its native dropdown also bubbles up and matches the selector again).
+    chordsEl.addEventListener('click', (e) => {
+        const td = e.target.closest('td.vowel-editable');
+        if (!td || !currentDoc || td.querySelector('select')) return;
+        const idx = parseInt(td.dataset.idx, 10);
+        if (Number.isNaN(idx) || !currentDoc.chords[idx]) return;
+        openVowelPicker(td, idx);
+    });
 
     // Choosing a file both imports it and immediately commits it as the shared score:current
     // document (plan.md §10.2), so every row's "Edit" link is live right away — no separate
@@ -260,6 +381,11 @@ const SCORE_AUDIO_DEFAULTS = {
                     timeBeatType: currentResult.timeBeatType,
                     measureBoundariesBeats: Array.from(currentResult.measureBoundariesBeats),
                 },
+                // Persisted so a later page load (navigating away and back) can regenerate
+                // currentResult -- see resumeDocument() below. Not read by state.js's ?sid= path
+                // or anything else; an extra field on the same document, not a schema change to
+                // what those readers already expect.
+                sourceXml: currentXml,
                 updatedAt: Date.now(),
             };
             // A new document invalidates any undo/redo history from whatever was open before --
@@ -271,6 +397,7 @@ const SCORE_AUDIO_DEFAULTS = {
             writeScoreDocument(currentDoc);
             render();
             updateDocStrip();
+            updateUndoRedoButtons();
             exportBtn.disabled = false;
             retuneBtn.disabled = false;
             setPlaybackButtonsEnabled(true);
@@ -283,6 +410,7 @@ const SCORE_AUDIO_DEFAULTS = {
             retuneBtn.disabled = true;
             setPlaybackButtonsEnabled(false);
             updateDocStrip();
+            updateUndoRedoButtons();
         }
     };
 
@@ -358,9 +486,9 @@ const SCORE_AUDIO_DEFAULTS = {
     // not per-chord -- the Score data model has no place to store a per-chord override anyway.
     // Unconditionally overwrites every chord's cents, including any set by hand -- there's no
     // "custom, don't touch" flag in this data model (only the Chord-editor page's *global*
-    // intonation setting has a 'custom' mode, chords here are just numbers) -- so this is
-    // confirmed like any other bulk-overwrite action rather than getting its own undo mechanism,
-    // matching §10.7.9's resolution that a prompt is sufficient protection.
+    // intonation setting has a 'custom' mode, chords here are just numbers) -- so this keeps its
+    // confirm guard (§10.7.9's resolution: a prompt is sufficient protection for a bulk overwrite)
+    // even though it's now also on the undo stack (§10.8.3) -- belt and suspenders, not either/or.
     retuneBtn.onclick = () => {
         if (!currentDoc) return;
         const tuningStyle = retuneIntonationEl.value;
@@ -369,6 +497,7 @@ const SCORE_AUDIO_DEFAULTS = {
         if (!window.confirm(`Recompute cents for all ${total} chords using ${retuneIntonationEl.options[retuneIntonationEl.selectedIndex].text} tuning? This overwrites any existing cents, including manual ones.`)) {
             return;
         }
+        pushDocUndo();
 
         let retuned = 0;
         let skipped = 0;
@@ -389,6 +518,7 @@ const SCORE_AUDIO_DEFAULTS = {
         writeScoreDocument(currentDoc);
         render();
         updateDocStrip();
+        updateUndoRedoButtons();
         setStatus(`Re-tuned ${retuned} of ${total} chords to ${tuningStyle}` + (skipped ? ` (${skipped} unrecognized chord(s) left unchanged).` : '.'));
     };
 
@@ -457,8 +587,42 @@ const SCORE_AUDIO_DEFAULTS = {
         }
     };
 
+    // Fresh-session bootstrap (plan.md §10.7.9's Chord-page equivalent -- state.js's
+    // resumeStandaloneDocument() -- never had a /score counterpart until now): score:current
+    // survives navigating away and back (it's just localStorage), but this page never actually
+    // read it back in except reactively, via the `storage` listener above, which only fires when
+    // *another* tab writes -- a plain reload or nav-away-and-back left the table empty even though
+    // the data was still sitting there. currentResult (the raw import summary -- chord names,
+    // key/time signature, warnings) isn't itself persisted, so it's regenerated by re-running
+    // WebApi.importSummary() against the original file text (now persisted as sourceXml). A chord
+    // name computed this way can be stale relative to a voicing edited afterward -- already true
+    // and already accepted before this fix (see render()'s own comment on docChord vs. c.name),
+    // not a new limitation. A document written before this fix shipped has no sourceXml -- resumes
+    // silently fail closed (falls through to the normal "no file loaded" empty state) rather than
+    // throwing, since there's nothing recoverable about them, not a real error to surface.
+    function resumeDocument() {
+        const doc = readScoreDocument();
+        if (!doc || !doc.sourceXml) return;
+        try {
+            currentXml = doc.sourceXml;
+            currentResult = WebApi.importSummary(currentXml);
+            currentDoc = doc;
+            render();
+            updateDocStrip();
+            updateUndoRedoButtons();
+            exportBtn.disabled = false;
+            retuneBtn.disabled = false;
+            setPlaybackButtonsEnabled(true);
+            setStatus(`Resumed ${currentDoc.sourceLabel || 'previous session'} (${currentDoc.chords.length} chords).`);
+        } catch (e) {
+            setStatus('Could not resume previous score: ' + e.message, true);
+        }
+    }
+
     if (!WebApi) {
         setStatus('Engine bundle not loaded — run `./gradlew jsBrowserDevelopmentWebpack` in engine-kt/ first.', true);
         fileInput.disabled = true;
+    } else {
+        resumeDocument();
     }
 })();

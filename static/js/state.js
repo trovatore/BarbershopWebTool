@@ -12,7 +12,14 @@ const scoreDocStore = createDocumentStore(SCORE_STORAGE_KEY);
 
 // The standalone Chord page's own document (plan.md §10.7.1) -- only relevant when this tab
 // isn't live-editing a Score chord via ?sid= (see isChordDocumentDirty/syncChordToStandaloneDocument).
-const chordDocStore = createDocumentStore(CHORD_STORAGE_KEY);
+// persistHistory: true (plan.md §10.8.4) -- same reasoning as score.js's scoreStore: a bare visit
+// to `/` is a view onto a real, revisited-over-time document, not a disposable tab session, so its
+// undo history should survive navigating away and back too. Exported so main.js's undoChordEdit/
+// redoChordEdit can push/pop through this exact instance when NOT editing a live ?sid= chord --
+// has to be this same instance (not a second one main.js creates itself) so that this file's own
+// markImported()/markExported() calls (the actual import/export moments) correctly clear/persist
+// the same undo history main.js is reading, rather than two independent copies drifting apart.
+export const chordDocStore = createDocumentStore(CHORD_STORAGE_KEY, { persistHistory: true });
 
 export const VOWEL_PRESETS_LEGACY = {
     'i': [270, 2290, 3010], 'y': [270, 1800, 2300], 'ɪ': [390, 1990, 2550],

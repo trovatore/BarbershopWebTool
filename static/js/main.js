@@ -4,7 +4,7 @@ import { renderControls, handleGlobalKey, SERIAL as S_UI } from './ui-controls.j
 import { drawChord, SERIAL as S_NOT } from './notation.js';
 import { playChord, saveChordAsWav, analyzeAndShow, primeAudioContext, SERIAL as S_AUD } from './audio.js';
 import { analyzeChord, SERIAL as S_THY } from './theory.js';
-import { appState, syncInputsToState, syncStateToInputs, loadStateFromURL, generatePermalink, getNoteString, syncChordToScoreDocument, syncChordToStandaloneDocument, isScoreDocumentDirty, isChordDocumentDirty, establishFreshChordBaseline, VOWEL_PRESETS_LEGACY, VOWEL_PRESETS_EAR } from './state.js';
+import { appState, syncInputsToState, syncStateToInputs, loadStateFromURL, generatePermalink, getNoteString, syncChordToScoreDocument, syncChordToStandaloneDocument, isScoreDocumentDirty, isChordDocumentDirty, establishFreshChordBaseline, chordDocStore, VOWEL_PRESETS_LEGACY, VOWEL_PRESETS_EAR } from './state.js';
 import { createDocumentStore } from './document-store.js';
 import { readChordDocument } from './chord-store.js';
 
@@ -15,11 +15,24 @@ const SHOW_SERIALS = false;
 // of init(), below). Guards updateAnalysisResult()'s sync calls -- see the comment there.
 let bootstrapping = true;
 
-// Fine-grained, per-tab undo stack scoped to just the one chord being edited -- whether the
-// standalone default chord or a live ?sid= Score chord (plan.md §10.7.3/§10.7.4). Separate from
-// chord:current/score:current's own persistence -- just an in-memory undo/redo stack, same as
-// any editor's history: gone on reload, never shared across tabs.
+// Fine-grained undo stack scoped to just the one chord being edited (plan.md §10.7.3/§10.7.4),
+// used only for a live ?sid= Score-chord edit -- deliberately NOT persisted (plan.md §10.8.4,
+// confirmed with Mike): a ?sid= tab is a transient view onto one chord inside score:current, not
+// itself a document you'd expect to revisit later and still have undo history for -- closer to a
+// modal editing session than a standing page. Ctrl+Z there already only reaches back to edits made
+// since *this tab* was opened, since a fresh page load always starts this store empty -- there was
+// never a risk of it reaching into a change made before the tab existed, in a different tab.
 const chordUndoStore = createDocumentStore('chord:undo-scratch');
+
+// The standalone case (no ?sid=) instead pushes/pops through state.js's own chordDocStore
+// (persistHistory: true) -- same instance that file's markImported()/markExported() calls already
+// use for chord:current's dirty tracking, so import/export correctly clear/persist one shared
+// history rather than main.js keeping a second, independent copy that could drift. A bare visit to
+// `/` is a real, revisited-over-time document (same reasoning as score.js's scoreStore), unlike a
+// ?sid= tab.
+function activeUndoStore() {
+    return appState.ui.editingScoreChordId ? chordUndoStore : chordDocStore;
+}
 
 // The snapshot bundles the chord together with settings.intonation, even though intonation is a
 // global setting, not a chord field -- because updateAnalysisResult() overwrites chord.tuning
@@ -49,16 +62,16 @@ function applyUndoRedoContent(snap) {
 // Call as the first thing inside any handler that's about to mutate the active chord's own
 // fields (voices/tuning/vowel/formants) or flip intonation.
 function pushChordUndo() {
-    chordUndoStore.pushUndo(undoRedoContent());
+    activeUndoStore().pushUndo(undoRedoContent());
 }
 
-// Exported for a future document-strip UI to disable/enable Undo/Redo buttons (not built yet --
-// keyboard shortcuts only in this pass), and used directly by the test suite below.
-export function canUndoChord() { return chordUndoStore.canUndo(); }
-export function canRedoChord() { return chordUndoStore.canRedo(); }
+// Exported for the document-strip UI to disable/enable Undo/Redo buttons, and used directly by
+// the test suite below.
+export function canUndoChord() { return activeUndoStore().canUndo(); }
+export function canRedoChord() { return activeUndoStore().canRedo(); }
 
 export function undoChordEdit() {
-    const restored = chordUndoStore.undo(undoRedoContent());
+    const restored = activeUndoStore().undo(undoRedoContent());
     if (!restored) return;
     applyUndoRedoContent(restored);
     // skipSync=true: the DOM still shows the pre-undo values (radios, sliders) -- pulling them
@@ -69,7 +82,7 @@ export function undoChordEdit() {
 }
 
 export function redoChordEdit() {
-    const restored = chordUndoStore.redo(undoRedoContent());
+    const restored = activeUndoStore().redo(undoRedoContent());
     if (!restored) return;
     applyUndoRedoContent(restored);
     triggerMutation(true);

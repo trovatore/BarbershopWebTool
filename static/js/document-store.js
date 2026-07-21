@@ -1,13 +1,37 @@
 /* document-store.js — generic persisted-document + dirty-tracking + undo/redo (plan.md §10.7).
    Generalizes the pattern score-store.js established for the Score document so the same shape
-   works for the new standalone Chord-page document too. One `createDocumentStore()` instance per
+   works for the standalone Chord-page document too. One `createDocumentStore()` instance per
    document type (Score, standalone Chord) — each page's own module owns its instance, per
-   §10.7.6's "instantiated separately by each page" call. Not yet wired into score.js/state.js;
-   this is the store, not the UI. */
+   §10.7.6's "instantiated separately by each page" call. */
 
-export function createDocumentStore(storageKey, { undoLimit = 50 } = {}) {
+export function createDocumentStore(storageKey, { undoLimit = 50, persistHistory = false } = {}) {
+    const historyKey = storageKey + ':history';
     let undoStack = [];
     let redoStack = [];
+
+    // Off by default -- most callers (e.g. main.js's chordUndoStore, scoped to a single tab's
+    // visit on purpose, plan.md §10.8.4) want undo/redo to be plain in-memory tab state, gone on
+    // reload. A store that opts in gets its stacks written to a second localStorage key (kept
+    // separate from the document's own key, since history is editor-session metadata, not part of
+    // the document's actual content) and rehydrated here at construction time, so a page that
+    // treats itself as "a view of a persisted document" (e.g. /score) can survive navigating away
+    // and back with undo history intact, not just the document's own content/dirty state.
+    if (persistHistory) {
+        try {
+            const raw = localStorage.getItem(historyKey);
+            if (raw) {
+                const parsed = JSON.parse(raw);
+                undoStack = parsed.undo || [];
+                redoStack = parsed.redo || [];
+            }
+        } catch (e) {
+            console.error(`Failed to read undo history ${historyKey}`, e);
+        }
+    }
+
+    function saveHistory() {
+        if (persistHistory) localStorage.setItem(historyKey, JSON.stringify({ undo: undoStack, redo: redoStack }));
+    }
 
     function read() {
         try {
@@ -40,6 +64,7 @@ export function createDocumentStore(storageKey, { undoLimit = 50 } = {}) {
     function markImported(content, label) {
         undoStack = [];
         redoStack = [];
+        saveHistory();
         return snapshot(content, label);
     }
 
@@ -65,6 +90,7 @@ export function createDocumentStore(storageKey, { undoLimit = 50 } = {}) {
         undoStack.push(JSON.stringify(content));
         if (undoStack.length > undoLimit) undoStack.shift();
         redoStack = [];
+        saveHistory();
     }
 
     function canUndo() { return undoStack.length > 0; }
@@ -75,13 +101,17 @@ export function createDocumentStore(storageKey, { undoLimit = 50 } = {}) {
     function undo(currentContent) {
         if (!undoStack.length) return null;
         redoStack.push(JSON.stringify(currentContent));
-        return JSON.parse(undoStack.pop());
+        const restored = JSON.parse(undoStack.pop());
+        saveHistory();
+        return restored;
     }
 
     function redo(currentContent) {
         if (!redoStack.length) return null;
         undoStack.push(JSON.stringify(currentContent));
-        return JSON.parse(redoStack.pop());
+        const restored = JSON.parse(redoStack.pop());
+        saveHistory();
+        return restored;
     }
 
     return { read, write, markImported, markExported, isDirty, pushUndo, undo, redo, canUndo, canRedo };
