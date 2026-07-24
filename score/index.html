@@ -29,6 +29,18 @@
         .vowel-picker { font-size: 0.85rem; }
         .cents-note { white-space: nowrap; }
         tr.measure-row td { background: #f5f6f8; color: #888; font-size: 0.75rem; font-weight: bold; padding: 3px 8px; border-bottom: 1px solid #e1e4e8; }
+        .row-action-btn { font-size: 0.7rem; padding: 2px 6px; font-weight: normal; margin-left: 4px; }
+        .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 100; }
+        .modal-box { background: white; border-radius: 12px; padding: 20px; width: 560px; max-height: 80vh; display: flex; flex-direction: column; box-shadow: 0 10px 30px rgba(0,0,0,0.3); }
+        .modal-box .row { flex-wrap: wrap; }
+        #pickerFixRow label { display: flex; align-items: center; gap: 4px; }
+        #pickerFixRow input { width: 55px; }
+        #pickerResults { overflow-y: auto; border: 1px solid #eee; border-radius: 6px; flex: 1; min-height: 100px; }
+        .picker-result { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; border-bottom: 1px solid #f0f0f0; cursor: pointer; font-size: 0.85rem; }
+        .picker-result:hover { background: #f5f6f8; }
+        .picker-result:last-child { border-bottom: none; }
+        .picker-result-notes { color: #666; font-size: 0.8rem; }
+        .picker-result-tentative { color: #a15c00; font-size: 0.75rem; }
     </style>
 </head>
 <body>
@@ -93,6 +105,34 @@
         </thead>
         <tbody id="chords"></tbody>
     </table>
+    <div class="row" style="margin-top: 10px;">
+        <button id="appendChordBtn" disabled>+ Add chord</button>
+    </div>
+</div>
+
+<div id="chordPickerOverlay" class="modal-overlay" style="display: none;">
+    <div class="modal-box">
+        <div class="row" style="justify-content: space-between; margin-bottom: 5px;">
+            <strong id="pickerTargetLabel"></strong>
+            <button id="pickerCloseBtn" class="strip-btn">✕ Close</button>
+        </div>
+        <div class="row" style="font-size: 0.85rem;">
+            <label for="pickerNameInput">Chord name:</label>
+            <input type="text" id="pickerNameInput" placeholder="e.g. Cm7" style="width: 90px;">
+            <label for="pickerBeatsInput">Beats:</label>
+            <input type="number" id="pickerBeatsInput" value="1" min="0.25" step="0.25" style="width: 55px;">
+            <button id="pickerSearchBtn">Search</button>
+        </div>
+        <div class="row" id="pickerFixRow" style="font-size: 0.8rem;">
+            <span style="color: #666;">Fix specific notes (optional):</span>
+            <label>Tenor <input type="text" id="pickerFix-3" placeholder="e.g. C4"></label>
+            <label>Lead <input type="text" id="pickerFix-2" placeholder="e.g. C4"></label>
+            <label>Bari <input type="text" id="pickerFix-1" placeholder="e.g. C4"></label>
+            <label>Bass <input type="text" id="pickerFix-0" placeholder="e.g. C4"></label>
+        </div>
+        <div id="pickerStatus" class="status"></div>
+        <div id="pickerResults"></div>
+    </div>
 </div>
 <script src="../engine/barbershop-engine.js"></script>
 <script type="module" src="../static/js/score.js"></script>

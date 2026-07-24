@@ -3,7 +3,10 @@ import { getAbsSemitone } from './spelling.js';
 
 export const SERIAL = "#004";
 
-const CHORD_PATTERNS = {
+// Exported (plan.md §10.9) so voicing-generator.js's chord-name parser and voicing templates
+// reuse this exact table instead of restating it -- same "don't let two tables drift apart"
+// discipline as JUST_OFFSETS/PYTH_OFFSETS already follow relative to ChordLabel.kt's copies.
+export const CHORD_PATTERNS = {
     "0,4,7": { name: "Major triad", type: "triad" },
     "0,3,7": { name: "Minor triad", type: "triad" },
     "0,4,7,10": { name: "Dominant seventh", type: "seventh" },
@@ -11,10 +14,20 @@ const CHORD_PATTERNS = {
     "0,3,6,9": { name: "Diminished seventh", type: "seventh" },
     "0,4,7,11": { name: "Major seventh", type: "seventh" },
     "0,3,7,10": { name: "Minor seventh", type: "seventh" },
-    "0,4,8": { name: "Augmented triad", type: "triad" }
+    "0,4,8": { name: "Augmented triad", type: "triad" },
+    // The barbershop no-fifth ninth (root/3rd/b7/9th, root present) -- matches ChordLabel.kt's
+    // own "0,2,4,10" entry exactly (plan.md §10.9). Distinct from the existing rootless-9th
+    // *reinterpretation* of a half-diminished shape below (allow_rootless) -- that's a different
+    // 4-note pitch-class set (3rd/5th/b7/9th, root absent) serving a different purpose (an
+    // alternate reading of notes already on the page), not a generatable shape of its own.
+    "0,2,4,10": { name: "Dominant ninth (no fifth)", type: "seventh" }
 };
 
-const ROLE_MAP = {
+// Exported alongside CHORD_PATTERNS (plan.md §10.9) so js-tests.html's voicing-template
+// round-trip check can invert this table itself rather than hand-transcribing a second copy of
+// "which role name means which interval" -- role names here are generic (interval-based, e.g.
+// "Minor 6th" for a raised 5th in an augmented triad), not chord-aware relabeling.
+export const ROLE_MAP = {
     0: "Root", 1: "Minor 2nd", 2: "Major 2nd", 3: "Minor 3rd",
     4: "Major 3rd", 5: "Perfect 4th", 6: "Dim 5th", 7: "Fifth",
     8: "Minor 6th", 9: "Major 6th", 10: "Flat 7th", 11: "Major 7th"
@@ -117,6 +130,8 @@ export function analyzeChord(notes, options = {}) {
     };
 }
 
-function getPCName(pc) {
+// Exported (plan.md §10.9) so the chord-picker UI can label a search result ("C minor seventh")
+// without a second hardcoded copy of this table.
+export function getPCName(pc) {
     return ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"][pc];
 }

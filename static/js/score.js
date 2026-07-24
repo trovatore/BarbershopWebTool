@@ -3,12 +3,13 @@
    Edit links + live sync back from the Chord page (§10.2 slice 2). Choosing a file both loads
    and starts editing in one step (plan.md §10.2 UX simplification, 2026-07-12) — there's no
    "preview without committing" state anymore. */
-import { STR_TO_ACC, ACC_TO_STR } from './spelling.js';
+import { STR_TO_ACC, ACC_TO_STR, getAbsSemitone } from './spelling.js';
 import { writeScoreDocument, readScoreDocument, newChordId, SCORE_STORAGE_KEY } from './score-store.js';
 import { VOWEL_PRESETS_EAR, getNoteString } from './state.js';
 import { createDocumentStore } from './document-store.js';
-import { analyzeChord } from './theory.js';
+import { analyzeChord, CHORD_PATTERNS, getPCName } from './theory.js';
 import { playScore, stopScorePlayback, saveScoreAsWav, primeAudioContext } from './audio.js';
+import { parseChordName, generateVoicings } from './voicing-generator.js';
 
 // Best-effort warm-up on the page's first genuine user gesture (any click/keypress/etc, not
 // necessarily on a playback control) -- see primeAudioContext()'s own doc comment in audio.js.
@@ -50,6 +51,15 @@ const SCORE_AUDIO_DEFAULTS = {
     const docLabelEl = document.getElementById('docLabel');
     const undoBtn = document.getElementById('undoBtn');
     const redoBtn = document.getElementById('redoBtn');
+    const appendChordBtn = document.getElementById('appendChordBtn');
+    const chordPickerOverlay = document.getElementById('chordPickerOverlay');
+    const pickerTargetLabelEl = document.getElementById('pickerTargetLabel');
+    const pickerCloseBtn = document.getElementById('pickerCloseBtn');
+    const pickerNameInput = document.getElementById('pickerNameInput');
+    const pickerBeatsInput = document.getElementById('pickerBeatsInput');
+    const pickerSearchBtn = document.getElementById('pickerSearchBtn');
+    const pickerStatusEl = document.getElementById('pickerStatus');
+    const pickerResultsEl = document.getElementById('pickerResults');
     let playbackResetTimer = null;
 
     // [{volume, mute}, ...] indexed Bass/Bari/Lead/Tenor, matching VOICE_ORDER below -- read
@@ -194,17 +204,26 @@ const SCORE_AUDIO_DEFAULTS = {
             : preset
                 ? { f1: preset[0], f2: preset[1], f3: preset[2] }
                 : { f1: 730, f2: 1090, f3: 2440 }; // unrecognized key — same fallback as no-vowel-data
+        const voices = VOICE_ORDER.map(({ part, field, fallback }) =>
+            Object.assign({ part }, parseVoiceString(c[field], fallback))
+        );
         return {
             id: newChordId(),
             beats: c.beats,
-            voices: VOICE_ORDER.map(({ part, field, fallback }) =>
-                Object.assign({ part }, parseVoiceString(c[field], fallback))
-            ),
+            voices,
             tuning: VOICE_ORDER.map(({ part }) => c[CENTS_FIELD[part]] || 0),
             vowel: preset || isCustom ? vowelKey : 'a',
             formants,
             volumePerPart: [1, 1, 1, 1],
-            analysis: null,
+            // Computed once at import (plan.md §10.9), not left null -- render() needs a name
+            // source that stays correctly *positioned* even after a chord's inserted/removed
+            // elsewhere in the list, which the Kotlin-derived currentResult.chords[i] array can't
+            // give it (that array is fixed-length/fixed-order from import time, so any splice
+            // desyncs its indices from currentDoc.chords' the moment one happens). Still goes
+            // stale after a *live* edit to this same chord's own notes, same as before (a real
+            // analysis pass only runs at import/insert/replace time, not on every edit) --
+            // unchanged, deliberate limitation, not something this fixes or was meant to.
+            analysis: analyzeChord(voices.map(v => voiceDisplayString(v)), { tuning_style: 'just' }),
         };
     }
 
@@ -254,22 +273,38 @@ const SCORE_AUDIO_DEFAULTS = {
         let pos = 0;
         const rows = [];
         const docChords = currentDoc ? currentDoc.chords : null;
-        result.chords.forEach((c, i) => {
+        // Iterate currentDoc.chords, not result.chords, once a document exists (plan.md §10.9) --
+        // result.chords is the fixed-length, import-time-only summary from the Kotlin engine; a
+        // chord inserted/appended/replaced via the chord picker only ever exists in currentDoc,
+        // so rendering off result.chords alone would silently never show it. Every docChord's own
+        // .analysis (populated at import time by toStateChord, or at commit time by the picker) is
+        // the real name source now -- a first version of this preferred result.chords[i].name
+        // when present, which quietly broke the instant a splice desynced the two arrays'
+        // indices (caught live: inserting a chord made every name below it shift by one). Still
+        // goes stale after a *live* edit to that same chord's own notes, unchanged from before.
+        const chordList = docChords || result.chords;
+        chordList.forEach((docChord, i) => {
+            const c = result.chords[i]; // only present for chords that existed at original import
             while (boundaryIdx < boundaries.length - 1 && pos >= boundaries[boundaryIdx] - EPS) {
                 rows.push(`<tr class="measure-row"><td colspan="9">Measure ${boundaryIdx + 1}</td></tr>`);
                 boundaryIdx++;
             }
-            // If this score has been saved for editing, prefer the live voices out of
-            // score:current over the import-time summary — reflects edits made in another tab
-            // (§10.2 slice 2). The chord *name* isn't re-derived here (that needs a real
-            // analysis pass, not just a display concern) so it can go stale after an edit.
-            const docChord = docChords ? docChords[i] : null;
-            const tenor = appendCents(docChord ? voiceDisplayString(docChord.voices[3]) : c.tenor, docChord ? docChord.tuning[3] : c.tenorCents);
-            const lead = appendCents(docChord ? voiceDisplayString(docChord.voices[2]) : c.lead, docChord ? docChord.tuning[2] : c.leadCents);
-            const bari = appendCents(docChord ? voiceDisplayString(docChord.voices[1]) : c.bari, docChord ? docChord.tuning[1] : c.bariCents);
-            const bass = appendCents(docChord ? voiceDisplayString(docChord.voices[0]) : c.bass, docChord ? docChord.tuning[0] : c.bassCents);
-            const vowel = vowelDisplayString(docChord ? docChord.vowel : c.vowelKey);
-            const editLink = docChord
+            const chordIsDoc = !!docChords;
+            const tenor = appendCents(chordIsDoc ? voiceDisplayString(docChord.voices[3]) : c.tenor, chordIsDoc ? docChord.tuning[3] : c.tenorCents);
+            const lead = appendCents(chordIsDoc ? voiceDisplayString(docChord.voices[2]) : c.lead, chordIsDoc ? docChord.tuning[2] : c.leadCents);
+            const bari = appendCents(chordIsDoc ? voiceDisplayString(docChord.voices[1]) : c.bari, chordIsDoc ? docChord.tuning[1] : c.bariCents);
+            const bass = appendCents(chordIsDoc ? voiceDisplayString(docChord.voices[0]) : c.bass, chordIsDoc ? docChord.tuning[0] : c.bassCents);
+            const vowel = vowelDisplayString(chordIsDoc ? docChord.vowel : c.vowelKey);
+            const beats = chordIsDoc ? docChord.beats : c.beats;
+            // docChord.analysis (computed once at import/insert/replace time, see toStateChord's
+            // own comment) is the primary source once a document exists -- unlike c.name, it
+            // stays correctly positioned after a splice. c.name only remains as a fallback for a
+            // score:current document persisted before this fix, whose chords may still carry
+            // analysis: null.
+            const name = chordIsDoc
+                ? (docChord.analysis ? docChord.analysis.common_name : (c ? c.name : '?'))
+                : c.name;
+            const editLink = chordIsDoc
                 ? `<a href="../?sid=${encodeURIComponent(docChord.id)}" target="_blank">Edit</a>`
                 : '';
             // Click-to-edit picker (plan.md §10.2's item 7): a lighter way to change just the
@@ -277,19 +312,27 @@ const SCORE_AUDIO_DEFAULTS = {
             // (i.e. there's a live score:current entry to write back into), which in practice is
             // always true once a file's been loaded, since loading both imports and starts
             // editing in one step (see fileInput.onchange above).
-            const vowelTd = docChord
+            const vowelTd = chordIsDoc
                 ? `<td class="vowel-col vowel-editable" data-idx="${i}" title="Click to change vowel">${escapeHtml(vowel)}</td>`
                 : `<td class="vowel-col">${escapeHtml(vowel)}</td>`;
+            // Insert-before/Replace (plan.md §10.9's chord picker) -- only meaningful once a
+            // document exists to actually splice into.
+            const rowActions = chordIsDoc
+                ? `${editLink}
+                    <button class="row-action-btn" data-picker-mode="insert" data-picker-idx="${i}" title="Insert a new chord before this one">⊕ Insert</button>
+                    <button class="row-action-btn" data-picker-mode="replace" data-picker-idx="${i}" title="Replace this chord">↻ Replace</button>`
+                : '';
             rows.push(`<tr>
-                <td>${i}</td><td>${c.beats}</td><td>${escapeHtml(c.name)}</td>
+                <td>${i}</td><td>${beats}</td><td>${escapeHtml(name)}</td>
                 ${vowelTd}
                 <td class="cents-note">${escapeHtml(tenor)}</td><td class="cents-note">${escapeHtml(lead)}</td>
                 <td class="cents-note">${escapeHtml(bari)}</td><td class="cents-note">${escapeHtml(bass)}</td>
-                <td>${editLink}</td>
+                <td>${rowActions}</td>
             </tr>`);
-            pos += c.beats;
+            pos += beats;
         });
         chordsEl.innerHTML = rows.join('');
+        appendChordBtn.disabled = !docChords;
     }
 
     // Inline vowel picker (plan.md §10.2's item 7, built 2026-07-21): clicking a chord's vowel
@@ -345,6 +388,211 @@ const SCORE_AUDIO_DEFAULTS = {
         const idx = parseInt(td.dataset.idx, 10);
         if (Number.isNaN(idx) || !currentDoc.chords[idx]) return;
         openVowelPicker(td, idx);
+    });
+
+    // Chord picker (plan.md §10.9): a modal for inserting/appending/replacing a chord in the
+    // score's list -- name it, fix 1-2 specific voice pitches, or both, and pick from the real
+    // matching voicings voicing-generator.js's search returns. Deliberately a modal, not another
+    // ?sid= tab (agreed with Mike) -- it only ever writes into score:current through the same
+    // pushDocUndo()/writeScoreDocument() path bulk re-tune and the vowel picker already use, so
+    // undo/redo covers it for free, no cross-tab sync to design.
+    let pickerTarget = null; // { mode: 'insert' | 'replace' | 'append', index }
+    const PICKER_RESULT_CAP = 60;
+    const FIX_NOTE_PATTERN = /^([a-gA-G])(bb|b|#|x)?([0-8])$/;
+
+    function parseFixInput(text) {
+        const trimmed = (text || '').trim();
+        if (!trimmed) return null;
+        const m = trimmed.match(FIX_NOTE_PATTERN);
+        return m ? { step: m[1].toLowerCase(), acc: STR_TO_ACC[m[2] || ''], oct: parseInt(m[3], 10) } : undefined;
+    }
+
+    function openChordPicker(mode, index) {
+        if (!currentDoc) return;
+        pickerTarget = { mode, index };
+        pickerTargetLabelEl.textContent = mode === 'append' ? `Appending chord #${currentDoc.chords.length}`
+            : mode === 'insert' ? `Inserting before chord #${index}`
+            : `Replacing chord #${index}`;
+        pickerNameInput.value = '';
+        pickerBeatsInput.value = mode === 'replace' ? String(currentDoc.chords[index].beats) : '1';
+        [0, 1, 2, 3].forEach(i => { document.getElementById(`pickerFix-${i}`).value = ''; });
+        showPickerStatus('', false);
+        pickerResultsEl.innerHTML = '';
+        chordPickerOverlay.style.display = 'flex';
+        pickerNameInput.focus();
+    }
+
+    function closeChordPicker() {
+        chordPickerOverlay.style.display = 'none';
+        pickerTarget = null;
+    }
+
+    function showPickerStatus(msg, isError) {
+        pickerStatusEl.textContent = msg;
+        pickerStatusEl.className = isError ? 'status error' : 'status';
+    }
+
+    function runPickerSearch() {
+        const nameText = pickerNameInput.value.trim();
+        const opts = {};
+
+        if (nameText) {
+            const parsed = parseChordName(nameText);
+            if (!parsed) {
+                showPickerStatus(`"${nameText}" isn't a recognized chord name (try e.g. Cm7, F#7, Bbmaj7).`, true);
+                pickerResultsEl.innerHTML = '';
+                return;
+            }
+            opts.pattern = parsed.pattern;
+            const rootSemi = getAbsSemitone({ step: parsed.rootStep, acc: parsed.rootAcc, oct: 0 });
+            opts.rootPc = ((rootSemi % 12) + 12) % 12;
+        }
+
+        const fixed = [];
+        for (const voice of [0, 1, 2, 3]) {
+            const raw = document.getElementById(`pickerFix-${voice}`).value;
+            if (!raw.trim()) continue;
+            const parsedNote = parseFixInput(raw);
+            if (!parsedNote) {
+                showPickerStatus(`"${raw}" isn't a recognized note (try e.g. C4, F#3, Bb4).`, true);
+                pickerResultsEl.innerHTML = '';
+                return;
+            }
+            fixed.push({ voice, semi: getAbsSemitone(parsedNote) });
+        }
+        if (fixed.length) opts.fixed = fixed;
+
+        if (!opts.pattern && !fixed.length) {
+            showPickerStatus('Enter a chord name and/or fix at least one note to search.', true);
+            pickerResultsEl.innerHTML = '';
+            return;
+        }
+
+        renderPickerResults(generateVoicings(opts));
+    }
+
+    function renderPickerResults(results) {
+        if (!results.length) {
+            showPickerStatus('No matching chords found.', false);
+            pickerResultsEl.innerHTML = '';
+            return;
+        }
+        const shown = results.slice(0, PICKER_RESULT_CAP);
+        showPickerStatus(
+            results.length > PICKER_RESULT_CAP
+                ? `Showing first ${PICKER_RESULT_CAP} of ${results.length} matches — narrow your search for more precise results.`
+                : `${results.length} match${results.length === 1 ? '' : 'es'}.`,
+            false
+        );
+
+        pickerResultsEl.innerHTML = shown.map(r => {
+            const qualityName = (CHORD_PATTERNS[r.pattern] && CHORD_PATTERNS[r.pattern].name) || r.pattern;
+            const label = `${getPCName(r.rootPc)} ${qualityName}`;
+            // r.voices is Bass/Bari/Lead/Tenor (index 0-3, matching VOICE_ORDER) -- displayed
+            // Tenor-first to match the score table's own column order.
+            const notesDisplay = [3, 2, 1, 0].map(i => voiceDisplayString(r.voices[i])).join(' / ');
+            const tentativeNote = r.tentative
+                ? '<div class="picker-result-tentative">Not yet vetted by ear — may need adjustment</div>' : '';
+            return `<div class="picker-result">
+                <div>
+                    <div>${escapeHtml(label)} — ${escapeHtml(r.description)}</div>
+                    <div class="picker-result-notes">${escapeHtml(notesDisplay)}</div>
+                    ${tentativeNote}
+                </div>
+            </div>`;
+        }).join('');
+
+        pickerResultsEl.querySelectorAll('.picker-result').forEach((el, i) => {
+            el.addEventListener('click', () => commitPickerResult(shown[i]));
+        });
+    }
+
+    // Both the exporter (MusicXmlExporter.buildSlices()/renderPart()) and this page's own
+    // "Measure N" divider rows only ever look at content up to metadata.measureBoundariesBeats'
+    // own last entry -- anything the chord picker adds beyond that is silently invisible to both,
+    // not just mis-displayed. Caught live (2026-07-23, Mike): inserting a chord before the first
+    // of a 2-chord/2-beat/2-4-time score dropped the *original second chord* on export -- true
+    // data loss, confirmed by reloading the exported file and finding it gone, not just a
+    // rendering quirk. Rebuilds boundaries from scratch using uniform measureBeats-length
+    // measures (metadata.timeBeats * 4 / timeBeatType quarter-note-beats per measure, matching
+    // MusicXML's <divisions> convention of always counting beats in quarter notes) rather than
+    // trying to preserve the original file's own boundary positions -- correct for the common
+    // case (a regular meter, no pickup measure); a real, accepted simplification for a file with
+    // an irregular first/last measure (it gets flattened into a regular one the first time the
+    // chord picker touches that score), far better than the silent data loss it replaces.
+    function syncMeasureBoundaries(doc) {
+        const meta = doc.metadata;
+        const totalBeats = doc.chords.reduce((sum, c) => sum + c.beats, 0);
+        const measureBeats = meta.timeBeats * 4 / meta.timeBeatType;
+        const boundaries = [0];
+        while (boundaries[boundaries.length - 1] < totalBeats - 1e-9) {
+            boundaries.push(boundaries[boundaries.length - 1] + measureBeats);
+        }
+        if (boundaries.length < 2) boundaries.push(measureBeats);
+        meta.measureBoundariesBeats = boundaries;
+    }
+
+    function commitPickerResult(candidate) {
+        if (!currentDoc || !pickerTarget) return;
+
+        // candidate.voices is already Bass/Bari/Lead/Tenor (index 0-3), the same order
+        // VOICE_ORDER/analyzeChord's positional part-labeling expects -- see VOICE_ORDER's own
+        // comment and retuneBtn's identical noteStrs construction.
+        const noteStrs = VOICE_ORDER.map((_, i) => voiceDisplayString(candidate.voices[i]));
+        const analysis = analyzeChord(noteStrs, { tuning_style: 'just' });
+        // Every template round-trips through analyzeChord() at every root (js-tests.html group
+        // 20) -- this fallback exists so a future template that doesn't would degrade to equal
+        // temperament rather than crash, not because it's expected to trigger.
+        const tuning = analysis.notes.length === 4 ? analysis.notes.map(n => n.tuning) : [0, 0, 0, 0];
+
+        const newChord = {
+            id: newChordId(),
+            beats: parseFloat(pickerBeatsInput.value) || 1,
+            voices: VOICE_ORDER.map(({ part }, i) => ({
+                part, step: candidate.voices[i].step, acc: candidate.voices[i].acc,
+                oct: candidate.voices[i].oct, rest: false,
+            })),
+            tuning,
+            // Fixed default vowel/formants ('a', matching toStateChord()'s own import-time
+            // fallback) -- the picker is about voicing, not vowel; use the existing vowel picker
+            // afterward same as any imported chord.
+            vowel: 'a',
+            formants: { f1: 730, f2: 1090, f3: 2440 },
+            volumePerPart: [1, 1, 1, 1],
+            analysis,
+        };
+
+        pushDocUndo();
+        if (pickerTarget.mode === 'append') {
+            currentDoc.chords.push(newChord);
+        } else if (pickerTarget.mode === 'insert') {
+            currentDoc.chords.splice(pickerTarget.index, 0, newChord);
+        } else {
+            currentDoc.chords[pickerTarget.index] = newChord;
+        }
+        syncMeasureBoundaries(currentDoc);
+        currentDoc.updatedAt = Date.now();
+        writeScoreDocument(currentDoc);
+        render();
+        updateDocStrip();
+        updateUndoRedoButtons();
+        const verb = { append: 'appended', insert: 'inserted', replace: 'replaced' }[pickerTarget.mode];
+        setStatus(`Chord ${verb}.`);
+        closeChordPicker();
+    }
+
+    appendChordBtn.onclick = () => openChordPicker('append', currentDoc ? currentDoc.chords.length : 0);
+    pickerCloseBtn.onclick = () => closeChordPicker();
+    pickerSearchBtn.onclick = () => runPickerSearch();
+    pickerNameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runPickerSearch(); });
+    chordPickerOverlay.addEventListener('click', (e) => { if (e.target === chordPickerOverlay) closeChordPicker(); });
+
+    // Delegated for the same reason as the vowel-editable listener above -- rows (and their
+    // Insert/Replace buttons) are fully replaced on every render().
+    chordsEl.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-picker-mode]');
+        if (!btn || !currentDoc) return;
+        openChordPicker(btn.dataset.pickerMode, parseInt(btn.dataset.pickerIdx, 10));
     });
 
     // Choosing a file both imports it and immediately commits it as the shared score:current
