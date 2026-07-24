@@ -51,6 +51,11 @@ const SCORE_AUDIO_DEFAULTS = {
     const docLabelEl = document.getElementById('docLabel');
     const undoBtn = document.getElementById('undoBtn');
     const redoBtn = document.getElementById('redoBtn');
+    const newScoreBtn = document.getElementById('newScoreBtn');
+    const resumeBannerEl = document.getElementById('resumeBanner');
+    const resumeBannerTextEl = document.getElementById('resumeBannerText');
+    const resumeBtn = document.getElementById('resumeBtn');
+    const dismissResumeBtn = document.getElementById('dismissResumeBtn');
     const appendChordBtn = document.getElementById('appendChordBtn');
     const chordPickerOverlay = document.getElementById('chordPickerOverlay');
     const pickerTargetLabelEl = document.getElementById('pickerTargetLabel');
@@ -257,71 +262,58 @@ const SCORE_AUDIO_DEFAULTS = {
         statusEl.className = isError ? 'status error' : 'status';
     }
 
+    // currentResult (the raw Kotlin import summary) is only ever present alongside currentDoc --
+    // set together on import/resume, cleared together on failure -- with one exception: a score
+    // created from scratch via "+ New score" (plan.md §15's usability follow-up) has a currentDoc
+    // but no currentResult at all, since there's no original file to have imported. render() is
+    // keyed entirely off currentDoc/currentDoc.metadata as a result -- currentResult only still
+    // supplies import-time warnings, which a hand-created score has none of anyway.
     function render() {
+        if (!currentDoc) return;
         const result = currentResult;
-        if (!result) return;
-        summaryEl.textContent = `Key: ${result.keyFifths} fifths  |  Time: ${result.timeBeats}/${result.timeBeatType}  |  ${result.chords.length} chords`;
+        const meta = currentDoc.metadata;
+        summaryEl.textContent = `Key: ${meta.keyFifths} fifths  |  Time: ${meta.timeBeats}/${meta.timeBeatType}  |  ${currentDoc.chords.length} chords`;
 
-        warningsEl.innerHTML = result.warnings.length
-            ? '<strong>' + result.warnings.length + ' warning(s):</strong><ul>' +
-              result.warnings.map(w => '<li>' + escapeHtml(w) + '</li>').join('') + '</ul>'
+        const warnings = result ? result.warnings : [];
+        warningsEl.innerHTML = warnings.length
+            ? '<strong>' + warnings.length + ' warning(s):</strong><ul>' +
+              warnings.map(w => '<li>' + escapeHtml(w) + '</li>').join('') + '</ul>'
             : '';
 
-        const boundaries = result.measureBoundariesBeats;
+        // currentDoc.metadata.measureBoundariesBeats, not result.measureBoundariesBeats -- the
+        // latter is only ever the stale, import-time snapshot, while syncMeasureBoundaries()
+        // (plan.md §10.9.2) keeps the former live as chords are inserted/appended/replaced. Using
+        // the stale one here (as this used to) meant these on-page "Measure N" dividers could
+        // silently disagree with what export actually produces once a picker edit changed the
+        // total beat count.
+        const boundaries = meta.measureBoundariesBeats;
         const EPS = 1e-6;
         let boundaryIdx = 0;
         let pos = 0;
         const rows = [];
-        const docChords = currentDoc ? currentDoc.chords : null;
-        // Iterate currentDoc.chords, not result.chords, once a document exists (plan.md §10.9) --
-        // result.chords is the fixed-length, import-time-only summary from the Kotlin engine; a
-        // chord inserted/appended/replaced via the chord picker only ever exists in currentDoc,
-        // so rendering off result.chords alone would silently never show it. Every docChord's own
-        // .analysis (populated at import time by toStateChord, or at commit time by the picker) is
-        // the real name source now -- a first version of this preferred result.chords[i].name
-        // when present, which quietly broke the instant a splice desynced the two arrays'
-        // indices (caught live: inserting a chord made every name below it shift by one). Still
-        // goes stale after a *live* edit to that same chord's own notes, unchanged from before.
-        const chordList = docChords || result.chords;
-        chordList.forEach((docChord, i) => {
-            const c = result.chords[i]; // only present for chords that existed at original import
+        currentDoc.chords.forEach((docChord, i) => {
             while (boundaryIdx < boundaries.length - 1 && pos >= boundaries[boundaryIdx] - EPS) {
                 rows.push(`<tr class="measure-row"><td colspan="9">Measure ${boundaryIdx + 1}</td></tr>`);
                 boundaryIdx++;
             }
-            const chordIsDoc = !!docChords;
-            const tenor = appendCents(chordIsDoc ? voiceDisplayString(docChord.voices[3]) : c.tenor, chordIsDoc ? docChord.tuning[3] : c.tenorCents);
-            const lead = appendCents(chordIsDoc ? voiceDisplayString(docChord.voices[2]) : c.lead, chordIsDoc ? docChord.tuning[2] : c.leadCents);
-            const bari = appendCents(chordIsDoc ? voiceDisplayString(docChord.voices[1]) : c.bari, chordIsDoc ? docChord.tuning[1] : c.bariCents);
-            const bass = appendCents(chordIsDoc ? voiceDisplayString(docChord.voices[0]) : c.bass, chordIsDoc ? docChord.tuning[0] : c.bassCents);
-            const vowel = vowelDisplayString(chordIsDoc ? docChord.vowel : c.vowelKey);
-            const beats = chordIsDoc ? docChord.beats : c.beats;
+            const tenor = appendCents(voiceDisplayString(docChord.voices[3]), docChord.tuning[3]);
+            const lead = appendCents(voiceDisplayString(docChord.voices[2]), docChord.tuning[2]);
+            const bari = appendCents(voiceDisplayString(docChord.voices[1]), docChord.tuning[1]);
+            const bass = appendCents(voiceDisplayString(docChord.voices[0]), docChord.tuning[0]);
+            const vowel = vowelDisplayString(docChord.vowel);
+            const beats = docChord.beats;
             // docChord.analysis (computed once at import/insert/replace time, see toStateChord's
-            // own comment) is the primary source once a document exists -- unlike c.name, it
-            // stays correctly positioned after a splice. c.name only remains as a fallback for a
-            // score:current document persisted before this fix, whose chords may still carry
-            // analysis: null.
-            const name = chordIsDoc
-                ? (docChord.analysis ? docChord.analysis.common_name : (c ? c.name : '?'))
-                : c.name;
-            const editLink = chordIsDoc
-                ? `<a href="../?sid=${encodeURIComponent(docChord.id)}" target="_blank">Edit</a>`
-                : '';
+            // own comment) is the name source -- stays correctly positioned across a splice,
+            // unlike a position-based lookup into a separate array would.
+            const name = docChord.analysis ? docChord.analysis.common_name : '?';
+            const editLink = `<a href="../?sid=${encodeURIComponent(docChord.id)}" target="_blank">Edit</a>`;
             // Click-to-edit picker (plan.md §10.2's item 7): a lighter way to change just the
-            // vowel without opening the full Chord editor -- only wired up when docChord exists
-            // (i.e. there's a live score:current entry to write back into), which in practice is
-            // always true once a file's been loaded, since loading both imports and starts
-            // editing in one step (see fileInput.onchange above).
-            const vowelTd = chordIsDoc
-                ? `<td class="vowel-col vowel-editable" data-idx="${i}" title="Click to change vowel">${escapeHtml(vowel)}</td>`
-                : `<td class="vowel-col">${escapeHtml(vowel)}</td>`;
-            // Insert-before/Replace (plan.md §10.9's chord picker) -- only meaningful once a
-            // document exists to actually splice into.
-            const rowActions = chordIsDoc
-                ? `${editLink}
-                    <button class="row-action-btn" data-picker-mode="insert" data-picker-idx="${i}" title="Insert a new chord before this one">⊕ Insert</button>
-                    <button class="row-action-btn" data-picker-mode="replace" data-picker-idx="${i}" title="Replace this chord">↻ Replace</button>`
-                : '';
+            // vowel without opening the full Chord editor.
+            const vowelTd = `<td class="vowel-col vowel-editable" data-idx="${i}" title="Click to change vowel">${escapeHtml(vowel)}</td>`;
+            // Insert-before/Replace (plan.md §10.9's chord picker).
+            const rowActions = `${editLink}
+                <button class="row-action-btn" data-picker-mode="insert" data-picker-idx="${i}" title="Insert a new chord before this one">⊕ Insert</button>
+                <button class="row-action-btn" data-picker-mode="replace" data-picker-idx="${i}" title="Replace this chord">↻ Replace</button>`;
             rows.push(`<tr>
                 <td>${i}</td><td>${beats}</td><td>${escapeHtml(name)}</td>
                 ${vowelTd}
@@ -332,7 +324,7 @@ const SCORE_AUDIO_DEFAULTS = {
             pos += beats;
         });
         chordsEl.innerHTML = rows.join('');
-        appendChordBtn.disabled = !docChords;
+        appendChordBtn.disabled = !currentDoc;
     }
 
     // Inline vowel picker (plan.md §10.2's item 7, built 2026-07-21): clicking a chord's vowel
@@ -835,26 +827,80 @@ const SCORE_AUDIO_DEFAULTS = {
         }
     };
 
+    function hideResumeBanner() {
+        resumeBannerEl.style.display = 'none';
+    }
+
+    // "+ New score" (plan.md §15's usability follow-up, 2026-07-24): the only way to get a
+    // currentDoc used to be importing a file, so "+ Add chord" stayed disabled forever on a page
+    // that had never had a file loaded. Reuses the same dirty-confirm guard as choosing a
+    // replacement file (fileInput.onchange above) -- starting a new score is the same kind of
+    // "discard what's here" action, so it also doubles as the "clear the current score" Mike asked
+    // for separately: clearing IS starting fresh here, there's no distinct lighter-weight
+    // empty-the-chords-but-keep-the-time-signature action. Time signature is asked up front (a
+    // plain prompt, matching this app's existing house style for one-off input -- see the retune
+    // confirm above) since the picker's voicing search and measure-boundary math both depend on
+    // it and there's no metadata editor UI to fix a wrong default later; key signature has no such
+    // UI need yet (nothing reads it besides display/export round-trip) so it silently defaults to
+    // 0 (no sharps/flats).
+    newScoreBtn.onclick = () => {
+        if (currentDoc && scoreStore.isDirty({ content: scoreContent(currentDoc), sourceSnapshot: currentDoc.sourceSnapshot }) &&
+            !window.confirm('Starting a new score will discard your current score, which has unsaved changes. Continue and discard them?')) {
+            return;
+        }
+        const input = window.prompt('Time signature for the new score (beats/beat-type), e.g. "4/4":', '4/4');
+        if (input === null) return;
+        const m = /^\s*(\d+)\s*\/\s*(\d+)\s*$/.exec(input);
+        const timeBeats = m && parseInt(m[1], 10);
+        const timeBeatType = m && parseInt(m[2], 10);
+        if (!m || timeBeats < 1 || ![1, 2, 4, 8, 16].includes(timeBeatType)) {
+            setStatus(`Invalid time signature "${input}" — expected e.g. "4/4", with beat-type one of 1/2/4/8/16. New score not created.`, true);
+            return;
+        }
+        currentXml = null;
+        currentResult = null;
+        currentDoc = {
+            chords: [],
+            metadata: { keyFifths: 0, timeBeats, timeBeatType, measureBoundariesBeats: [0, timeBeats * 4 / timeBeatType] },
+            sourceXml: null,
+            updatedAt: Date.now(),
+        };
+        // A new document invalidates any undo/redo history from whatever was open before -- see
+        // document-store.js's markImported doc comment (same reasoning fileInput.onchange uses).
+        const importSnap = scoreStore.markImported(scoreContent(currentDoc), `New score (${timeBeats}/${timeBeatType})`);
+        currentDoc.sourceLabel = importSnap.sourceLabel;
+        currentDoc.sourceSnapshot = importSnap.sourceSnapshot;
+        currentDoc.updatedAt = importSnap.updatedAt;
+        writeScoreDocument(currentDoc);
+        hideResumeBanner();
+        render();
+        updateDocStrip();
+        updateUndoRedoButtons();
+        exportBtn.disabled = false;
+        retuneBtn.disabled = false;
+        setPlaybackButtonsEnabled(true);
+        setStatus(`New score created (${timeBeats}/${timeBeatType}) — click "+ Add chord" to start.`);
+    };
+
     // Fresh-session bootstrap (plan.md §10.7.9's Chord-page equivalent -- state.js's
-    // resumeStandaloneDocument() -- never had a /score counterpart until now): score:current
-    // survives navigating away and back (it's just localStorage), but this page never actually
-    // read it back in except reactively, via the `storage` listener above, which only fires when
-    // *another* tab writes -- a plain reload or nav-away-and-back left the table empty even though
-    // the data was still sitting there. currentResult (the raw import summary -- chord names,
-    // key/time signature, warnings) isn't itself persisted, so it's regenerated by re-running
-    // WebApi.importSummary() against the original file text (now persisted as sourceXml). A chord
-    // name computed this way can be stale relative to a voicing edited afterward -- already true
-    // and already accepted before this fix (see render()'s own comment on docChord vs. c.name),
-    // not a new limitation. A document written before this fix shipped has no sourceXml -- resumes
-    // silently fail closed (falls through to the normal "no file loaded" empty state) rather than
-    // throwing, since there's nothing recoverable about them, not a real error to surface.
-    function resumeDocument() {
-        const doc = readScoreDocument();
-        if (!doc || !doc.sourceXml) return;
+    // resumeStandaloneDocument()), reworked 2026-07-24 (plan.md §15): score:current survives
+    // navigating away and back (it's just localStorage), and this used to resume it completely
+    // silently on every load -- surprising on a genuinely fresh visit, since there was no visible
+    // cue that anything had been auto-loaded at all (Mike: "I wasn't expecting to open the page
+    // from scratch and see the previous score still loaded"). A fresh load no longer auto-populates
+    // the table at all; if a previous document exists, it only offers to resume it via the
+    // #resumeBanner, one explicit click away -- nothing is lost, it's just not silent anymore.
+    // currentResult (the raw import summary -- chord names, key/time signature, warnings) isn't
+    // itself persisted, so for a document that came from a real file it's regenerated by re-running
+    // WebApi.importSummary() against the original file text (persisted as sourceXml). A document
+    // created via "+ New score" above has no sourceXml at all and resumes with currentResult left
+    // null, same as it was when created (see render()'s own comment on why that's fine).
+    function resumeDocument(doc) {
         try {
-            currentXml = doc.sourceXml;
-            currentResult = WebApi.importSummary(currentXml);
+            currentXml = doc.sourceXml || null;
+            currentResult = currentXml ? WebApi.importSummary(currentXml) : null;
             currentDoc = doc;
+            hideResumeBanner();
             render();
             updateDocStrip();
             updateUndoRedoButtons();
@@ -867,10 +913,21 @@ const SCORE_AUDIO_DEFAULTS = {
         }
     }
 
+    resumeBtn.onclick = () => {
+        const doc = readScoreDocument();
+        if (doc) resumeDocument(doc);
+    };
+    dismissResumeBtn.onclick = hideResumeBanner;
+
     if (!WebApi) {
         setStatus('Engine bundle not loaded — run `./gradlew jsBrowserDevelopmentWebpack` in engine-kt/ first.', true);
         fileInput.disabled = true;
+        newScoreBtn.disabled = true;
     } else {
-        resumeDocument();
+        const doc = readScoreDocument();
+        if (doc) {
+            resumeBannerTextEl.textContent = `Resume "${doc.sourceLabel || 'previous score'}" (${doc.chords.length} chords)?`;
+            resumeBannerEl.style.display = 'flex';
+        }
     }
 })();

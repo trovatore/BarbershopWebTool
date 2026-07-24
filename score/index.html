@@ -18,6 +18,8 @@
         .strip-btn { padding: 3px 9px; font-size: 0.75rem; border-radius: 4px; font-weight: normal; }
         .strip-nav-link { margin-left: auto; color: #007bff; text-decoration: none; }
         .strip-nav-link:hover { text-decoration: underline; }
+        #resumeBanner { background: #eef3ff; padding: 8px 10px; border-radius: 6px; font-size: 0.85rem; }
+        #resumeBannerText { color: #333; }
         #summary { font-size: 0.9rem; color: #333; margin-bottom: 10px; }
         #warnings { font-size: 0.85rem; color: #a15c00; margin-bottom: 10px; }
         table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
@@ -47,11 +49,17 @@
 <div class="card">
     <h1>Barbershop Score — MusicXML import (experimental)</h1>
     <div class="row doc-strip">
-        <span id="docLabel">No file loaded</span>
+        <span id="docLabel">No score loaded</span>
         <span id="dirtyIndicator"></span>
         <button id="undoBtn" class="strip-btn" disabled title="Undo (Ctrl+Z)">↶ Undo</button>
         <button id="redoBtn" class="strip-btn" disabled title="Redo (Ctrl+Shift+Z)">↷ Redo</button>
+        <button id="newScoreBtn" class="strip-btn" title="Start a new, empty score">+ New score</button>
         <a href="../" class="strip-nav-link">← Chord page</a>
+    </div>
+    <div class="row" id="resumeBanner" style="display: none;">
+        <span id="resumeBannerText"></span>
+        <button id="resumeBtn" class="strip-btn">Resume</button>
+        <button id="dismissResumeBtn" class="strip-btn">Dismiss</button>
     </div>
     <div class="row">
         <input type="file" id="xmlFile" accept=".xml,.musicxml">
