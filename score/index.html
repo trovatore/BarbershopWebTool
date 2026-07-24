@@ -3,6 +3,7 @@
 <html>
 <head>
     <title>Barbershop Score</title>
+    <script src="https://cdn.jsdelivr.net/npm/vexflow@4.2.2/build/cjs/vexflow.js"></script>
     <style>
         body { font-family: system-ui, sans-serif; background: #f0f2f5; padding: 20px; display: flex; flex-direction: column; align-items: center; }
         .card { background: white; padding: 30px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.08); width: 800px; }
@@ -43,6 +44,11 @@
         .picker-result:last-child { border-bottom: none; }
         .picker-result-notes { color: #666; font-size: 0.8rem; }
         .picker-result-tentative { color: #a15c00; font-size: 0.75rem; }
+        .picker-result-revoice-btn { font-size: 0.7rem; padding: 2px 6px; font-weight: normal; margin-left: 8px; flex-shrink: 0; }
+        #scoreRevoiceOverlay { z-index: 101; }
+        #revoiceNotation { background: #fff; border: 1px solid #e1e4e8; border-radius: 8px; align-self: center; }
+        .revoice-octave-col { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 0.8rem; color: #555; background: #f8f9fa; border-radius: 8px; padding: 8px 12px; }
+        .revoice-octave-col button { padding: 2px 10px; }
     </style>
 </head>
 <body>
@@ -140,6 +146,28 @@
         </div>
         <div id="pickerStatus" class="status"></div>
         <div id="pickerResults"></div>
+    </div>
+</div>
+
+<div id="scoreRevoiceOverlay" class="modal-overlay" style="display: none;">
+    <div class="modal-box">
+        <div class="row" style="justify-content: space-between; margin-bottom: 5px;">
+            <strong>Revoice candidate</strong>
+            <button id="revoiceCloseBtn" class="strip-btn">✕ Close</button>
+        </div>
+        <div id="revoiceNotation"></div>
+        <div>
+            <div style="font-size: 0.85rem; color: #666; margin-bottom: 4px;">Swap two parts' notes:</div>
+            <div id="revoiceSwaps" class="row"></div>
+        </div>
+        <div>
+            <div style="font-size: 0.85rem; color: #666; margin-bottom: 4px;">Bump a part an octave:</div>
+            <div id="revoiceOctaves" class="row"></div>
+        </div>
+        <div class="row" style="justify-content: flex-end;">
+            <button id="revoiceCancelBtn">Cancel</button>
+            <button id="revoiceApplyBtn" style="background: #6f42c1; color: white; border: none;">Apply</button>
+        </div>
     </div>
 </div>
 <script src="../engine/barbershop-engine.js"></script>

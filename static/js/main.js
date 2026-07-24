@@ -7,6 +7,7 @@ import { analyzeChord, SERIAL as S_THY } from './theory.js';
 import { appState, syncInputsToState, syncStateToInputs, loadStateFromURL, generatePermalink, getNoteString, syncChordToScoreDocument, syncChordToStandaloneDocument, isScoreDocumentDirty, isChordDocumentDirty, establishFreshChordBaseline, chordDocStore, VOWEL_PRESETS_LEGACY, VOWEL_PRESETS_EAR } from './state.js';
 import { createDocumentStore } from './document-store.js';
 import { readChordDocument } from './chord-store.js';
+import { swapVoices, bumpOctave, SWAP_PAIRS, VOICE_LABELS } from './revoice.js';
 
 const S_IDX = "#067-STABLE";
 const SHOW_SERIALS = false;
@@ -347,6 +348,83 @@ export function cycleEnharmonic(idx) {
     triggerMutation();
 }
 
+// Revoice dialog (plan.md §17): swap which part sings which note, or bump a part an octave, with
+// a live grandstaff preview -- staged locally in revoiceVoices/revoiceTuning while the dialog is
+// open, only written into the real chord on Apply (one undo entry for the whole session, matching
+// how the vowel radio/intonation switch already commit as a single step, not one per click).
+// Cents travel with the pitch on a swap (see revoice.js's own doc comment on why), but not on an
+// octave bump (an octave doesn't change a note's harmonic role/interval from the root). Applying
+// while intonation isn't 'custom' gets the swapped cents immediately overwritten by triggerMutation
+// -> fetchAnalysis()'s fresh recompute anyway -- carrying them through is only load-bearing for
+// 'custom', where nothing else would fix up the cents to follow the pitch.
+let revoiceVoices = null;
+let revoiceTuning = null;
+
+function renderRevoiceDialog() {
+    drawChord('revoiceNotation', revoiceVoices);
+
+    const swapsEl = document.getElementById('revoiceSwaps');
+    if (swapsEl) {
+        swapsEl.innerHTML = SWAP_PAIRS.map(([a, b], i) =>
+            `<button data-swap-idx="${i}">${VOICE_LABELS[a]} ↔ ${VOICE_LABELS[b]}</button>`
+        ).join('');
+        swapsEl.querySelectorAll('button').forEach((btn, i) => {
+            btn.onclick = () => {
+                const [a, b] = SWAP_PAIRS[i];
+                const result = swapVoices(revoiceVoices, revoiceTuning, a, b);
+                revoiceVoices = result.voices;
+                revoiceTuning = result.tuning;
+                renderRevoiceDialog();
+            };
+        });
+    }
+
+    const octEl = document.getElementById('revoiceOctaves');
+    if (octEl) {
+        octEl.innerHTML = VOICE_LABELS.map((label, i) =>
+            `<span class="revoice-octave-col">${label}
+                <span>
+                    <button data-oct-idx="${i}" data-oct-dir="1" title="Up an octave">▲</button>
+                    <button data-oct-idx="${i}" data-oct-dir="-1" title="Down an octave">▼</button>
+                </span>
+            </span>`
+        ).join('');
+        octEl.querySelectorAll('button').forEach(btn => {
+            btn.onclick = () => {
+                const idx = parseInt(btn.dataset.octIdx, 10);
+                const dir = parseInt(btn.dataset.octDir, 10);
+                revoiceVoices = bumpOctave(revoiceVoices, idx, dir);
+                renderRevoiceDialog();
+            };
+        });
+    }
+}
+
+function openRevoiceDialog() {
+    const chord = appState.chords[appState.activeChordIndex];
+    revoiceVoices = chord.voices.map(v => Object.assign({}, v));
+    revoiceTuning = chord.tuning.slice();
+    renderRevoiceDialog();
+    const overlay = document.getElementById('revoiceOverlay');
+    if (overlay) overlay.style.display = 'flex';
+}
+
+function closeRevoiceDialog() {
+    const overlay = document.getElementById('revoiceOverlay');
+    if (overlay) overlay.style.display = 'none';
+    revoiceVoices = null;
+    revoiceTuning = null;
+}
+
+function applyRevoiceDialog() {
+    const chord = appState.chords[appState.activeChordIndex];
+    pushChordUndo();
+    chord.voices = revoiceVoices;
+    chord.tuning = revoiceTuning;
+    closeRevoiceDialog();
+    triggerMutation(true);
+}
+
 function init() {
     const resumedExistingDocument = loadStateFromURL();
     syncStateToInputs();
@@ -449,6 +527,10 @@ function init() {
     safeListen('shareBtn', 'onclick', generatePermalink);
     safeListen('undoBtn', 'onclick', undoChordEdit);
     safeListen('redoBtn', 'onclick', redoChordEdit);
+    safeListen('revoiceBtn', 'onclick', openRevoiceDialog);
+    safeListen('revoiceCloseBtn', 'onclick', closeRevoiceDialog);
+    safeListen('revoiceCancelBtn', 'onclick', closeRevoiceDialog);
+    safeListen('revoiceApplyBtn', 'onclick', applyRevoiceDialog);
     safeListen('analyzeBtn', 'onclick', async () => {
         const btn = document.getElementById('analyzeBtn');
         btn.disabled = true;

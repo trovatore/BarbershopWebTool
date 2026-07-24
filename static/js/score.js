@@ -10,6 +10,8 @@ import { createDocumentStore } from './document-store.js';
 import { analyzeChord, CHORD_PATTERNS, getPCName } from './theory.js';
 import { playScore, stopScorePlayback, saveScoreAsWav, primeAudioContext } from './audio.js';
 import { parseChordName, generateVoicings } from './voicing-generator.js';
+import { swapVoices, bumpOctave, SWAP_PAIRS, VOICE_LABELS } from './revoice.js';
+import { drawChord } from './notation.js';
 
 // Best-effort warm-up on the page's first genuine user gesture (any click/keypress/etc, not
 // necessarily on a playback control) -- see primeAudioContext()'s own doc comment in audio.js.
@@ -65,6 +67,10 @@ const SCORE_AUDIO_DEFAULTS = {
     const pickerSearchBtn = document.getElementById('pickerSearchBtn');
     const pickerStatusEl = document.getElementById('pickerStatus');
     const pickerResultsEl = document.getElementById('pickerResults');
+    const scoreRevoiceOverlay = document.getElementById('scoreRevoiceOverlay');
+    const revoiceCloseBtn = document.getElementById('revoiceCloseBtn');
+    const revoiceCancelBtn = document.getElementById('revoiceCancelBtn');
+    const revoiceApplyBtn = document.getElementById('revoiceApplyBtn');
     let playbackResetTimer = null;
 
     // [{volume, mute}, ...] indexed Bass/Bari/Lead/Tenor, matching VOICE_ORDER below -- read
@@ -407,7 +413,17 @@ const SCORE_AUDIO_DEFAULTS = {
             : `Replacing chord #${index}`;
         pickerNameInput.value = '';
         pickerBeatsInput.value = mode === 'replace' ? String(currentDoc.chords[index].beats) : '1';
-        [0, 1, 2, 3].forEach(i => { document.getElementById(`pickerFix-${i}`).value = ''; });
+        // Replacing a partial chord (one or more voices resting -- e.g. a MuseScore file with
+        // only 1-2 voices written in so far, plan.md §18) prepopulates "fix specific notes" with
+        // whatever's already sounding, so the first search is already constrained to keep those
+        // notes and fill in the rest, instead of the user retyping them by hand. Insert/append
+        // have no existing chord to prepopulate from.
+        const target = mode === 'replace' ? currentDoc.chords[index] : null;
+        [0, 1, 2, 3].forEach(i => {
+            const voice = target && target.voices[i];
+            document.getElementById(`pickerFix-${i}`).value =
+                voice && !voice.rest ? voiceDisplayString(voice) : '';
+        });
         showPickerStatus('', false);
         pickerResultsEl.innerHTML = '';
         chordPickerOverlay.style.display = 'flex';
@@ -491,13 +507,84 @@ const SCORE_AUDIO_DEFAULTS = {
                     <div class="picker-result-notes">${escapeHtml(notesDisplay)}</div>
                     ${tentativeNote}
                 </div>
+                <button class="picker-result-revoice-btn" data-revoice-idx="${shown.indexOf(r)}" title="Swap parts or bump a part an octave before committing this candidate">🔀 Revoice</button>
             </div>`;
         }).join('');
 
         pickerResultsEl.querySelectorAll('.picker-result').forEach((el, i) => {
             el.addEventListener('click', () => commitPickerResult(shown[i]));
         });
+        // Revoice button lives inside the same clickable row (plan.md §17) -- stopPropagation so
+        // clicking it opens the revoice dialog instead of immediately committing the un-revoiced
+        // candidate underneath it.
+        pickerResultsEl.querySelectorAll('.picker-result-revoice-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                openScoreRevoiceDialog(shown[parseInt(btn.dataset.revoiceIdx, 10)]);
+            });
+        });
     }
+
+    // Revoice dialog for a not-yet-committed picker candidate (plan.md §17): staged locally in
+    // revoiceVoices while open, same shape/behavior as the Chord editor's own revoice dialog
+    // (main.js) but committing through commitPickerResult() on Apply instead of writing directly
+    // into a chord -- a candidate has no tuning of its own yet (commitPickerResult always
+    // re-derives it fresh via analyzeChord(), see its own comment), so unlike main.js's version
+    // this one only ever stages voices, never cents.
+    let revoiceVoices = null;
+
+    function renderScoreRevoiceDialog() {
+        drawChord('revoiceNotation', revoiceVoices);
+
+        const swapsEl = document.getElementById('revoiceSwaps');
+        swapsEl.innerHTML = SWAP_PAIRS.map(([a, b], i) =>
+            `<button data-swap-idx="${i}">${VOICE_LABELS[a]} ↔ ${VOICE_LABELS[b]}</button>`
+        ).join('');
+        swapsEl.querySelectorAll('button').forEach((btn, i) => {
+            btn.onclick = () => {
+                const [a, b] = SWAP_PAIRS[i];
+                revoiceVoices = swapVoices(revoiceVoices, null, a, b).voices;
+                renderScoreRevoiceDialog();
+            };
+        });
+
+        const octEl = document.getElementById('revoiceOctaves');
+        octEl.innerHTML = VOICE_LABELS.map((label, i) =>
+            `<span class="revoice-octave-col">${label}
+                <span>
+                    <button data-oct-idx="${i}" data-oct-dir="1" title="Up an octave">▲</button>
+                    <button data-oct-idx="${i}" data-oct-dir="-1" title="Down an octave">▼</button>
+                </span>
+            </span>`
+        ).join('');
+        octEl.querySelectorAll('button').forEach(btn => {
+            btn.onclick = () => {
+                const idx = parseInt(btn.dataset.octIdx, 10);
+                const dir = parseInt(btn.dataset.octDir, 10);
+                revoiceVoices = bumpOctave(revoiceVoices, idx, dir);
+                renderScoreRevoiceDialog();
+            };
+        });
+    }
+
+    function openScoreRevoiceDialog(candidate) {
+        revoiceVoices = candidate.voices.map(v => Object.assign({}, v));
+        renderScoreRevoiceDialog();
+        scoreRevoiceOverlay.style.display = 'flex';
+    }
+
+    function closeScoreRevoiceDialog() {
+        scoreRevoiceOverlay.style.display = 'none';
+        revoiceVoices = null;
+    }
+
+    revoiceCloseBtn.onclick = closeScoreRevoiceDialog;
+    revoiceCancelBtn.onclick = closeScoreRevoiceDialog;
+    revoiceApplyBtn.onclick = () => {
+        const voices = revoiceVoices;
+        closeScoreRevoiceDialog();
+        commitPickerResult({ voices });
+    };
 
     // Both the exporter (MusicXmlExporter.buildSlices()/renderPart()) and this page's own
     // "Measure N" divider rows only ever look at content up to metadata.measureBoundariesBeats'
