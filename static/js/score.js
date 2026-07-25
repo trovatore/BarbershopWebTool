@@ -476,6 +476,10 @@ const SCORE_AUDIO_DEFAULTS = {
             return;
         }
 
+        // Ranks results by barbershoppiness + in-key-ness against the score's key signature
+        // (plan.md §23) -- the only key context available is the whole-piece keyFifths (§20's
+        // mid-piece-key-change gap), not necessarily this exact chord's local key.
+        opts.keyFifths = currentDoc.metadata.keyFifths;
         renderPickerResults(generateVoicings(opts));
     }
 

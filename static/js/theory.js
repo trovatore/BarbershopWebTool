@@ -140,3 +140,41 @@ export function analyzeChord(notes, options = {}) {
 export function getPCName(pc) {
     return ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"][pc];
 }
+
+// Circle-of-fifths order a key signature adds sharps/flats in -- standard convention, not
+// something specific to this app. Indexed by natural step letter so a sharp/flat can be applied
+// directly to that letter's own natural pitch class below.
+const SHARP_ORDER = ['f', 'c', 'g', 'd', 'a', 'e', 'b'];
+const FLAT_ORDER = ['b', 'e', 'a', 'd', 'g', 'c', 'f'];
+const NATURAL_STEP_PC = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b: 11 };
+
+/** The 7 pitch classes belonging to a key signature (plan.md §23) -- mode-agnostic on purpose,
+    since `keyFifths` alone can't distinguish a major key from its relative minor (same
+    signature, e.g. 1 sharp is either G major or E minor) and this app doesn't track mode
+    separately. [keyFifths] follows MusicXML's own convention (positive = sharps, negative =
+    flats, matching ScoreMetadata.keyFifths). Reusable beyond the chord-picker ranking this was
+    built for -- also what a real fix for the enharmonic-spelling-ignores-key gap (plan.md §15)
+    would need. */
+export function getKeyDiatonicPitchClasses(keyFifths) {
+    const pcs = { ...NATURAL_STEP_PC };
+    if (keyFifths > 0) {
+        for (let i = 0; i < keyFifths && i < SHARP_ORDER.length; i++) {
+            const step = SHARP_ORDER[i];
+            pcs[step] = (pcs[step] + 1 + 12) % 12;
+        }
+    } else if (keyFifths < 0) {
+        for (let i = 0; i < -keyFifths && i < FLAT_ORDER.length; i++) {
+            const step = FLAT_ORDER[i];
+            pcs[step] = (pcs[step] - 1 + 12) % 12;
+        }
+    }
+    return new Set(Object.values(pcs));
+}
+
+/** How many of [pitchClasses] fall outside the key signature's own 7-note collection -- 0 means
+    fully diatonic ("in-key"), used as the chromatic-ness measure for chord-picker ranking
+    (plan.md §23). */
+export function countChromaticPitchClasses(pitchClasses, keyFifths) {
+    const diatonic = getKeyDiatonicPitchClasses(keyFifths);
+    return pitchClasses.filter(pc => !diatonic.has(((pc % 12) + 12) % 12)).length;
+}

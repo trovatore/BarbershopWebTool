@@ -6,7 +6,7 @@
    to the search logic itself. Pure JS, no engine-kt/Android involvement -- this only needs to
    exist on /score. */
 import { STR_TO_ACC, getAbsSemitone, getVariations } from './spelling.js';
-import { CHORD_PATTERNS } from './theory.js';
+import { CHORD_PATTERNS, countChromaticPitchClasses } from './theory.js';
 
 export const SERIAL = "#001";
 
@@ -55,6 +55,17 @@ export function parseChordName(text) {
 //   - Minor/augmented triads: root-doubled and 3rd-doubled only -- no 2:3:4:5-style "spread"
 //     entry, since that shape falls directly out of the major triad's presence in the natural
 //     harmonic series and has no equivalent for a minor 3rd.
+//   - All three triad qualities also get a "2nd inversion, 5th doubled" voicing (Bass/Bari both
+//     on the 5th -- one an octave down, one at the chord's own octave -- Lead on the 3rd, Tenor
+//     on the root an octave up). Added 2026-07-25 after Mike hit a real gap: every original triad
+//     template put Lead on the root or the 5th, never the 3rd, so a search fixing Lead to a pitch
+//     only reachable as some chord's 3rd (e.g. Lead=G4 for an Eb major triad) silently dropped
+//     every triad of that quality/root, even though "leads do get the third from time to time" is
+//     just normal barbershop, not a corner case. This keeps Bass lowest/Tenor highest like every
+//     other template (js-tests.html 20.16) -- a specific arrangement where Lead sits *above*
+//     Tenor (Mike's own example: a "tenor melody" score where the single treble voice, defaulted
+//     to Lead per plan.md §21, is actually the top line) isn't baked in here as a general shape;
+//     that's what the Revoice dialog's octave-bump is for on the one chord that needs it.
 //   - Seventh chords: root position plus second inversion (5th in the bass), applied by the same
 //     mechanical construction across all five seventh qualities for consistency.
 //   - Minor seventh's voicings are a mechanical placeholder, not vetted by ear -- Mike was
@@ -66,12 +77,15 @@ export const VOICING_TEMPLATES = [
     { pattern: '0,4,7', description: 'Root doubled, close', offsets: [0, 4, 7, 12] },
     { pattern: '0,4,7', description: 'Root doubled, ringing (2:3:4:5)', offsets: [0, 7, 12, 16] },
     { pattern: '0,4,7', description: '3rd doubled', offsets: [0, 4, 7, 16] },
+    { pattern: '0,4,7', description: '2nd inversion, 5th doubled (Lead on 3rd)', offsets: [-5, 7, 4, 12] },
 
     { pattern: '0,3,7', description: 'Root doubled, close', offsets: [0, 3, 7, 12] },
     { pattern: '0,3,7', description: '3rd doubled', offsets: [0, 3, 7, 15] },
+    { pattern: '0,3,7', description: '2nd inversion, 5th doubled (Lead on 3rd)', offsets: [-5, 7, 3, 12] },
 
     { pattern: '0,4,8', description: 'Root doubled, close', offsets: [0, 4, 8, 12] },
     { pattern: '0,4,8', description: '3rd doubled', offsets: [0, 4, 8, 16] },
+    { pattern: '0,4,8', description: '2nd inversion, 5th doubled (Lead on 3rd)', offsets: [-4, 8, 4, 12] },
 
     { pattern: '0,4,7,10', description: 'Root position', offsets: [0, 4, 7, 10] },
     { pattern: '0,4,7,10', description: '2nd inversion (5th in bass)', offsets: [-5, 0, 4, 10] },
@@ -113,24 +127,75 @@ function withinRange(semi, voiceIndex) {
     return semi >= lo && semi <= hi;
 }
 
+function pitchClass(semi) {
+    return ((semi % 12) + 12) % 12;
+}
+
+// How idiomatic/common each quality is in barbershop, lowest = most common -- used to rank
+// chord-picker search results (plan.md §23, Mike's own list, 2026-07-25): "major triad, dominant
+// seventh, minor triad, minor seventh, ninth, half-diminished, diminished seventh". Major seventh
+// and augmented triad weren't in that list -- placed last as a placeholder (Mike: "we can start
+// with that list... ideally the design will be flexible enough that it can be easily tweaked
+// later"), not a genre judgment -- this table is the one place to reorder if that's wrong.
+export const BARBERSHOPPINESS_RANK = {
+    '0,4,7': 0,       // Major triad
+    '0,4,7,10': 1,    // Dominant seventh
+    '0,3,7': 2,       // Minor triad
+    '0,3,7,10': 3,    // Minor seventh
+    '0,2,4,10': 4,    // Dominant ninth (no fifth)
+    '0,3,6,10': 5,    // Half-diminished seventh
+    '0,3,6,9': 6,     // Diminished seventh
+    '0,4,7,11': 7,    // Major seventh -- placeholder position, not in Mike's list
+    '0,4,8': 8,       // Augmented triad -- placeholder position, not in Mike's list
+};
+
+// How many "barbershoppiness ranks" one out-of-key note costs when blending the two factors into
+// a single ordering (plan.md §23) -- Mike was explicit he's not sure how to weight these against
+// each other, so this is a first guess to be tuned once there's real search output to react to,
+// not a measured constant. Deliberately a single named constant, not buried in a formula, so it's
+// obvious where to change it.
+const CHROMATIC_PENALTY_PER_NOTE = 1.5;
+
 /**
  * Generates candidate voicings, optionally filtered by quality/root and/or 1-2 fixed voice
  * pitches -- the same one search serves both "generate by name" (quality+root given, no fixed
  * notes) and "search by fixed notes" (quality/root left open) per the unified design agreed with
  * Mike, not two separate mechanisms.
  *
+ * Results are ranked (plan.md §23, 2026-07-25) by a blended score: `BARBERSHOPPINESS_RANK` for
+ * the quality, plus `CHROMATIC_PENALTY_PER_NOTE` for every note outside `opts.keyFifths`'s key
+ * signature -- a rarer-but-in-key chord can outrank a commoner-but-chromatic one, which is what
+ * Mike asked for over a simpler "quality first, in-key only as a tiebreaker" scheme. `keyFifths`
+ * checks against the score's one whole-piece key signature (plan.md §20's mid-piece-key-change
+ * gap means this can't yet be more precise than that for a piece that actually changes key).
+ * Deduplicated *within* each template (same pattern+rootPc+description) to just its lowest valid
+ * octave placement -- collapses the biggest source of clutter (the same shape repeated every
+ * octave) without collapsing genuinely different named voicings across templates, even ones
+ * that happen to be reachable from each other via Revoice (e.g. the major triad's "close" and
+ * "ringing (2:3:4:5)" templates) -- those stay deliberately distinct, separately-selectable
+ * options, per Mike's explicit call when this was raised.
+ *
  * @param {object} [opts]
  * @param {string} [opts.pattern] - a CHORD_PATTERNS key (e.g. "0,4,7") to restrict to one quality.
  * @param {number} [opts.rootPc] - a pitch class 0-11 to restrict to one root.
- * @param {Array<{voice: number, semi: number}>} [opts.fixed] - exact semitone constraints per
- *   voice index (0=Bass..3=Tenor). A candidate must match every entry exactly (same octave, not
- *   just pitch class) -- "the lead sings C4" means C4, not C in any octave.
+ * @param {Array<{voice: number, semi: number}>} [opts.fixed] - pitch-class constraints per voice
+ *   index (0=Bass..3=Tenor) -- "the lead sings C4" means *some* C, matched against whichever
+ *   octave a template naturally lands that voice in, not C4 specifically (changed 2026-07-25,
+ *   Mike: "I thought we were listing all chords that match the notes" -- exact-octave matching
+ *   was silently excluding musically-valid quality/root matches whenever reaching the fixed
+ *   voice's *exact* octave pushed some other voice out of its own range, same failure mode twice
+ *   over in plan.md §22/§24). A voice landing in a different octave than what's actually in the
+ *   current chord is expected -- Revoice's octave-bump moves it to the exact target afterward.
+ * @param {number} [opts.keyFifths] - the score's key signature (MusicXML <fifths> convention),
+ *   for in-key/chromatic ranking. Defaults to 0 (no sharps/flats) if omitted.
  * @returns {Array<{pattern: string, rootPc: number, description: string, tentative: boolean,
- *   voices: Array<{step: string, acc: number, oct: number}>}>}
+ *   voices: Array<{step: string, acc: number, oct: number}>, rankScore: number}>} sorted
+ *   ascending by rankScore (lower = shown first).
  */
 export function generateVoicings(opts = {}) {
-    const { pattern, rootPc, fixed = [] } = opts;
+    const { pattern, rootPc, fixed = [], keyFifths = 0 } = opts;
     const results = [];
+    const seenTemplateKeys = new Set();
 
     for (const template of VOICING_TEMPLATES) {
         if (pattern !== undefined && template.pattern !== pattern) continue;
@@ -138,25 +203,35 @@ export function generateVoicings(opts = {}) {
         for (let candidateRootPc = 0; candidateRootPc < 12; candidateRootPc++) {
             if (rootPc !== undefined && candidateRootPc !== rootPc) continue;
 
+            // Only the lowest valid octave placement per (template, root) survives when nothing
+            // fixes a specific pitch -- every other placement is the exact same voicing shape an
+            // octave (or more) higher, not a musically distinct option.
+            const templateKey = `${template.pattern}|${candidateRootPc}|${template.description}`;
+
             // Scan root placements across several octaves -- VOICE_RANGES bounds which ones
             // actually survive, brute force is fine given how small this search space is (a few
             // hundred template x root x octave combinations at most).
             for (let rootSemi = candidateRootPc; rootSemi <= candidateRootPc + 96; rootSemi += 12) {
                 const voiceSemis = template.offsets.map(o => rootSemi + o);
                 if (!voiceSemis.every((s, i) => withinRange(s, i))) continue;
-                if (!fixed.every(f => voiceSemis[f.voice] === f.semi)) continue;
+                if (!fixed.every(f => pitchClass(voiceSemis[f.voice]) === pitchClass(f.semi))) continue;
+                if (seenTemplateKeys.has(templateKey)) continue;
+                seenTemplateKeys.add(templateKey);
 
+                const chromaticNotes = countChromaticPitchClasses(voiceSemis.map(pitchClass), keyFifths);
                 results.push({
                     pattern: template.pattern,
                     rootPc: candidateRootPc,
                     description: template.description,
                     tentative: !!template.tentative,
                     voices: spellVoices(voiceSemis),
+                    rankScore: BARBERSHOPPINESS_RANK[template.pattern] + chromaticNotes * CHROMATIC_PENALTY_PER_NOTE,
                 });
             }
         }
     }
 
+    results.sort((a, b) => a.rankScore - b.rankScore);
     return results;
 }
 
