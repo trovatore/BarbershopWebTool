@@ -53,12 +53,17 @@ export function analyzeChord(notes, options = {}) {
     const allowRootless = options.allow_rootless !== undefined ? options.allow_rootless : false;
     const tuningStyle = options.tuning_style || "just";
     
-    const pObjs = notes.map(n => {
+    // idx is each note's position in the *original* notes array (Bass/Bari/Lead/Tenor, index
+    // 0-3) -- threaded through every stage below so the final notes[].part label stays correct
+    // even when a rest ("–", or any other unparseable entry) gets filtered out here. Without this,
+    // a chord with e.g. only Bass resting would silently relabel Bari's own entry as "Bass" (the
+    // old code used the *filtered* array's index, not the voice's real position).
+    const pObjs = notes.map((n, idx) => {
         const match = n.match(/^([a-gA-G])(bb|b|#|x)?([0-8])$/i);
         if (!match) return null;
         const stepMap = { 'c': 0, 'd': 2, 'e': 4, 'f': 5, 'g': 7, 'a': 9, 'b': 11 };
         const acc = match[2] ? (match[2] === 'x' ? 2 : (match[2] === 'bb' ? -2 : (match[2] === '#' ? 1 : -1))) : 0;
-        return { name: n, semi: (parseInt(match[3]) * 12) + stepMap[match[1].toLowerCase()] + acc };
+        return { name: n, semi: (parseInt(match[3]) * 12) + stepMap[match[1].toLowerCase()] + acc, idx };
     }).filter(p => p !== null);
 
     if (pObjs.length === 0) return { common_name: "Unknown Chord", inversion: "N/A", voicing: "N/A", notes: [] };
@@ -108,7 +113,7 @@ export function analyzeChord(notes, options = {}) {
         let diff = (p.semi % 12 - tuningRootPC + 12) % 12;
         let role = ROLE_MAP[diff];
         if (virtualRootMode && diff === 2) role = "Ninth";
-        return { name: p.name, semi: p.semi, role: role, rawOffset: offsets[role] || 0.0 };
+        return { name: p.name, semi: p.semi, role: role, rawOffset: offsets[role] || 0.0, idx: p.idx };
     });
 
     const rootPitch = virtualRootMode ? (tuningRootPC + 4) % 12 : rootPC;
@@ -121,8 +126,8 @@ export function analyzeChord(notes, options = {}) {
                       (bestMatch.name.includes("triad") ? getPCName(rootPC) + "-" + bestMatch.name.toLowerCase() : bestMatch.name),
         inversion: invName,
         voicing: currentVoicing,
-        notes: voiceRoles.map((v, i) => ({
-            part: ["Bass", "Bari", "Lead", "Tenor"][i],
+        notes: voiceRoles.map(v => ({
+            part: ["Bass", "Bari", "Lead", "Tenor"][v.idx],
             note: v.name,
             role: v.role,
             tuning: tuningStyle === "equal" ? 0.0 : Math.round((v.rawOffset - rootOffset) * 10) / 10

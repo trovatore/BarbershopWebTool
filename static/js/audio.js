@@ -112,6 +112,7 @@ function setupAudioGraph(ctx, chordState, startTime, duration, tuningData, opts,
     const individualGainBase = opts.volume / Math.sqrt(Math.max(1, opts.vps));
 
     chordState.forEach((note, i) => {
+        if (note.rest) return; // a resting voice contributes no sound at all, not a quiet one
         const baseCents = (tuningData && tuningData[i] !== undefined) ? tuningData[i] : 0;
         const partSpec = opts.partSettings ? opts.partSettings[i] : null;
         

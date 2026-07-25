@@ -11,6 +11,8 @@
         .controls { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 10px; }
         .part-ctrl { background: #f8f9fa; padding: 15px; border-radius: 10px; text-align: center; border: 2px solid #eee; cursor: pointer; transition: all 0.1s; }
         .part-ctrl.active { border-color: #007bff; background: #e7f3ff; }
+        .part-ctrl.resting { opacity: 0.55; }
+        .part-ctrl.resting.active { opacity: 0.8; }
         
         .note-row { display: flex; align-items: center; justify-content: center; gap: 6px; margin-bottom: 10px; }
         input.note-input { width: 80px; font-size: 1.1rem; text-align: center; padding: 6px; border: 1px solid #ccc; border-radius: 6px; font-weight: bold; outline: none; }

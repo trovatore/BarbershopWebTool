@@ -6,13 +6,16 @@ export function renderControls(container, chordState, selectedIdx, tuningState, 
     container.innerHTML = '';
     chordState.forEach((p, i) => {
         const div = document.createElement('div');
-        div.className = `part-ctrl ${i === selectedIdx ? 'active' : ''}`;
-        
+        div.className = `part-ctrl ${i === selectedIdx ? 'active' : ''} ${p.rest ? 'resting' : ''}`;
+
         div.onclick = () => {
             window.dispatchEvent(new CustomEvent('selectPart', { detail: i }));
         };
-        
-        const display = p.step.toUpperCase() + ACC_TO_STR[p.acc] + p.oct;
+
+        // "R" both displays a resting voice's state and doubles as the exact string you'd type
+        // back into the note field to rest it again (main.js's manualUpdate()) -- what you see is
+        // what you'd type, matching the plain-note fields' own "type what you see" convention.
+        const display = p.rest ? 'R' : (p.step.toUpperCase() + ACC_TO_STR[p.acc] + p.oct);
         const currentTuning = tuningState[i];
         const displayTuning = (currentTuning === "" || currentTuning === undefined) ? "" : (currentTuning > 0 ? "+" + currentTuning : currentTuning);
         const pSet = partSettings[i];

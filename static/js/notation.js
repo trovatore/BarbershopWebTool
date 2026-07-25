@@ -16,16 +16,23 @@ export function drawChord(divId, chordState) {
     new StaveConnector(topStave, botStave).setType(StaveConnector.type.BRACE).setContext(context).draw();
 
     const makeNote = (noteObj, stem, clef, forceNatural, isUnison, xShift = 0) => {
+        // A resting voice gets a real rest glyph, not a pitch it isn't actually singing --
+        // "b/4" only sets the rest glyph's vertical position on the staff (VexFlow convention),
+        // it isn't a pitch. No stem/accidental logic applies to a rest.
+        if (noteObj.rest) {
+            return new StaveNote({ keys: ['b/4'], duration: 'qr', clef: clef });
+        }
+
         let o = (clef === 'treble') ? noteObj.oct + 1 : noteObj.oct;
         const vn = new StaveNote({ keys: [`${noteObj.step}/${o}`], duration: "q", stem_direction: stem, clef: clef });
-        
+
         let accStr = null;
         if (noteObj.acc !== 0 && !isUnison) {
             accStr = ACC_TO_STR[noteObj.acc].replace('x', '##');
         } else if (noteObj.acc === 0 && forceNatural) {
             accStr = "n";
         }
-        
+
         if (accStr) {
             vn.addModifier(new Accidental(accStr), 0);
         }
@@ -37,7 +44,11 @@ export function drawChord(divId, chordState) {
         return vn;
     };
 
+    // A resting voice has no real pitch relationship to its staff-mate -- false-relation/unison
+    // detection would otherwise compare its placeholder pitch against a genuinely sounding note
+    // and could spuriously trigger an accidental/shift meant for two real, clashing pitches.
     const getLogic = (vUp, vDown) => {
+        if (vUp.rest || vDown.rest) return { isUnison: false, isFalse: false, upNat: false, downNat: false };
         const isUnison = (vUp.step === vDown.step && vUp.acc === vDown.acc && vUp.oct === vDown.oct);
         const isFalse = (vUp.step === vDown.step && vUp.oct === vDown.oct && vUp.acc !== vDown.acc);
         const upNat = (vUp.acc === 0 && vDown.acc !== 0 && vUp.step === vDown.step && vUp.oct === vDown.oct);

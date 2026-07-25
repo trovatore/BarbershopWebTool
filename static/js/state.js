@@ -101,9 +101,9 @@ export const appState = {
     }
 };
 
-export function getNoteString(obj) { 
-    if (!obj || !obj.step) return "";
-    return obj.step + (ACC_TO_STR[obj.acc] || "") + (obj.oct ?? ""); 
+export function getNoteString(obj) {
+    if (!obj || !obj.step || obj.rest) return "";
+    return obj.step + (ACC_TO_STR[obj.acc] || "") + (obj.oct ?? "");
 }
 
 export function syncInputsToState() {

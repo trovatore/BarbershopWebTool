@@ -160,7 +160,18 @@ function updateAnalysisResult(data, chord) {
     if (rolesEl) rolesEl.innerHTML = (data.notes || []).map(n => "<div>" + n.part + ": <strong>" + n.role + "</strong></div>").join('');
     
     if (appState.settings.intonation !== 'custom' && data.notes) {
-        chord.tuning = data.notes.map(n => n.tuning);
+        // Scatter by .part, not a positional overwrite of the whole array -- data.notes only has
+        // entries for voices analyzeChord() could actually parse (a resting voice's note string
+        // is "" per getNoteString(), filtered out before analysis even runs), so its length can be
+        // under 4 whenever any voice is resting or the chord isn't recognized at all. The old
+        // positional `chord.tuning = data.notes.map(n => n.tuning)` would either misassign cents
+        // to the wrong voice once any voice was filtered, or wipe every voice's tuning to an empty
+        // array the instant analysis found nothing (an "Unknown Chord", which any partially-
+        // resting chord routinely produces) -- scattering by part only ever touches voices analysis
+        // actually found a role for, leaving a resting (or otherwise unmatched) voice's own tuning
+        // alone.
+        const PART_TO_IDX = { Bass: 0, Bari: 1, Lead: 2, Tenor: 3 };
+        data.notes.forEach(n => { chord.tuning[PART_TO_IDX[n.part]] = n.tuning; });
         // Analysis resolves after triggerMutation()'s own (necessarily pre-analysis) sync call
         // already ran, so that earlier sync persisted stale tuning -- this is the point where
         // the real, up-to-date values exist, and the only place that syncs them. Skipped during
@@ -321,20 +332,36 @@ export function updateNote(idx, semiChange) {
     const chord = appState.chords[appState.activeChordIndex];
     pushChordUndo();
     const context = chord.voices.map((s, i) => ({ step: s.step, semi: getAbsSemitone(s), idx: i })).filter(n => n.idx !== idx);
-    chord.voices[idx] = Object.assign({}, chord.voices[idx], getVariations(getAbsSemitone(chord.voices[idx]) + semiChange, chord.voices[idx].oct, context)[0]);
+    // rest: false -- bumping a resting voice's pitch (its placeholder, since that's all it has)
+    // is a deliberate edit and should bring it back in, same reasoning as manualUpdate's real-note
+    // branch below.
+    chord.voices[idx] = Object.assign({}, chord.voices[idx], getVariations(getAbsSemitone(chord.voices[idx]) + semiChange, chord.voices[idx].oct, context)[0], { rest: false });
     triggerMutation();
 }
 
+// Typing "R" (case-insensitive) rests a voice instead of naming a pitch -- plan.md §19. Keeps the
+// existing pitch/octave untouched so there's still a plausible starting point if it's un-rested
+// again later, matching the same "keep a plausible pitch" convention parseVoiceString() already
+// uses for a voice that arrives resting from an import. Any real note typed afterward un-rests it
+// via the branch below.
+const REST_INPUT_PATTERN = /^r$/i;
+
 export function manualUpdate(idx, val) {
+    const chord = appState.chords[appState.activeChordIndex];
+    if (REST_INPUT_PATTERN.test(val.trim())) {
+        pushChordUndo();
+        chord.voices[idx] = Object.assign({}, chord.voices[idx], { rest: true });
+        triggerMutation();
+        return;
+    }
     const match = val.match(/^([a-gA-G])(bb|b|#|x)?([0-8])$/i);
     if (match) {
         const step = match[1].toLowerCase();
         const acc = STR_TO_ACC[match[2] ? match[2].toLowerCase() : ""];
         const oct = parseInt(match[3]);
-        const chord = appState.chords[appState.activeChordIndex];
         pushChordUndo();
         const context = chord.voices.map((s, i) => ({ step: s.step, semi: getAbsSemitone(s), idx: i })).filter(n => n.idx !== idx);
-        chord.voices[idx] = Object.assign({}, chord.voices[idx], getVariations((oct * 12) + STEP_TO_SEMI[step] + acc, chord.voices[idx].oct, context)[0]);
+        chord.voices[idx] = Object.assign({}, chord.voices[idx], getVariations((oct * 12) + STEP_TO_SEMI[step] + acc, chord.voices[idx].oct, context)[0], { rest: false });
         triggerMutation();
     }
 }
@@ -344,7 +371,7 @@ export function cycleEnharmonic(idx) {
     pushChordUndo();
     const vars = getVariations(getAbsSemitone(chord.voices[idx]), chord.voices[idx].oct, chord.voices.map((s, i) => ({ step: s.step, semi: getAbsSemitone(s), idx: i })).filter(n => n.idx !== idx));
     let curIdx = vars.findIndex(v => v.step === chord.voices[idx].step && v.acc === chord.voices[idx].acc && v.oct === chord.voices[idx].oct);
-    chord.voices[idx] = Object.assign({}, chord.voices[idx], vars[(curIdx + 1) % vars.length]);
+    chord.voices[idx] = Object.assign({}, chord.voices[idx], vars[(curIdx + 1) % vars.length], { rest: false });
     triggerMutation();
 }
 
