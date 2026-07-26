@@ -7,7 +7,7 @@ import { STR_TO_ACC, ACC_TO_STR, getAbsSemitone } from './spelling.js';
 import { writeScoreDocument, readScoreDocument, newChordId, SCORE_STORAGE_KEY } from './score-store.js';
 import { VOWEL_PRESETS_EAR, getNoteString } from './state.js';
 import { createDocumentStore } from './document-store.js';
-import { analyzeChord, CHORD_PATTERNS, getPCName } from './theory.js';
+import { analyzeChord, CHORD_PATTERNS, getPCName, keyFifthsAtBeat } from './theory.js';
 import { playScore, stopScorePlayback, saveScoreAsWav, primeAudioContext } from './audio.js';
 import { parseChordName, generateVoicings } from './voicing-generator.js';
 import { swapVoices, bumpOctave, SWAP_PAIRS, VOICE_LABELS } from './revoice.js';
@@ -278,7 +278,9 @@ const SCORE_AUDIO_DEFAULTS = {
         if (!currentDoc) return;
         const result = currentResult;
         const meta = currentDoc.metadata;
-        summaryEl.textContent = `Key: ${meta.keyFifths} fifths  |  Time: ${meta.timeBeats}/${meta.timeBeatType}  |  ${currentDoc.chords.length} chords`;
+        const keyChangeSuffix = meta.keyChanges && meta.keyChanges.length > 1
+            ? ` (+${meta.keyChanges.length - 1} change${meta.keyChanges.length > 2 ? 's' : ''})` : '';
+        summaryEl.textContent = `Key: ${meta.keyFifths} fifths${keyChangeSuffix}  |  Time: ${meta.timeBeats}/${meta.timeBeatType}  |  ${currentDoc.chords.length} chords`;
 
         const warnings = result ? result.warnings : [];
         warningsEl.innerHTML = warnings.length
@@ -405,6 +407,16 @@ const SCORE_AUDIO_DEFAULTS = {
         return m ? { step: m[1].toLowerCase(), acc: STR_TO_ACC[m[2] || ''], oct: parseInt(m[3], 10) } : undefined;
     }
 
+    // Cumulative beat position at which currentDoc.chords[index] starts (or, for index ==
+    // chords.length, where an appended chord would start) -- same summation render() already
+    // does for its measure-boundary rows, pulled out so the picker's per-position key lookup
+    // (plan.md §26) can reuse it instead of re-deriving it.
+    function chordStartBeat(index) {
+        let pos = 0;
+        for (let i = 0; i < index; i++) pos += currentDoc.chords[i].beats;
+        return pos;
+    }
+
     function openChordPicker(mode, index) {
         if (!currentDoc) return;
         pickerTarget = { mode, index };
@@ -476,10 +488,10 @@ const SCORE_AUDIO_DEFAULTS = {
             return;
         }
 
-        // Ranks results by barbershoppiness + in-key-ness against the score's key signature
-        // (plan.md §23) -- the only key context available is the whole-piece keyFifths (§20's
-        // mid-piece-key-change gap), not necessarily this exact chord's local key.
-        opts.keyFifths = currentDoc.metadata.keyFifths;
+        // Ranks results by barbershoppiness + in-key-ness (plan.md §23) against the key signature
+        // actually active at this chord's position -- mid-piece key changes are now tracked
+        // (plan.md §26), so this is the real local key, not just the score's beat-0 one.
+        opts.keyFifths = keyFifthsAtBeat(currentDoc.metadata.keyChanges, chordStartBeat(pickerTarget.index));
         renderPickerResults(generateVoicings(opts));
     }
 
@@ -708,6 +720,11 @@ const SCORE_AUDIO_DEFAULTS = {
                 chords: currentResult.chords.map(toStateChord),
                 metadata: {
                     keyFifths: currentResult.keyFifths,
+                    // Parallel arrays (plan.md §26) zipped into the {atBeat, keyFifths} shape
+                    // used everywhere else in this file and in theory.js's keyFifthsAtBeat().
+                    keyChanges: Array.from(currentResult.keyChangeBeats).map((atBeat, i) => (
+                        { atBeat, keyFifths: currentResult.keyChangeFifths[i] }
+                    )),
                     timeBeats: currentResult.timeBeats,
                     timeBeatType: currentResult.timeBeatType,
                     measureBoundariesBeats: Array.from(currentResult.measureBoundariesBeats),
@@ -782,7 +799,10 @@ const SCORE_AUDIO_DEFAULTS = {
             const jsChords = currentDoc.chords.map(toJsEditedChord);
             const meta = currentDoc.metadata;
             const exported = WebApi.exportEditedScore(
-                jsChords, meta.keyFifths, meta.timeBeats, meta.timeBeatType,
+                jsChords, meta.keyFifths,
+                Float64Array.from(meta.keyChanges.map(k => k.atBeat)),
+                Int32Array.from(meta.keyChanges.map(k => k.keyFifths)),
+                meta.timeBeats, meta.timeBeatType,
                 Float64Array.from(meta.measureBoundariesBeats)
             );
             const blob = new Blob([exported], { type: 'application/vnd.recordare.musicxml+xml' });
@@ -952,7 +972,7 @@ const SCORE_AUDIO_DEFAULTS = {
         currentResult = null;
         currentDoc = {
             chords: [],
-            metadata: { keyFifths: 0, timeBeats, timeBeatType, measureBoundariesBeats: [0, timeBeats * 4 / timeBeatType] },
+            metadata: { keyFifths: 0, keyChanges: [{ atBeat: 0, keyFifths: 0 }], timeBeats, timeBeatType, measureBoundariesBeats: [0, timeBeats * 4 / timeBeatType] },
             sourceXml: null,
             updatedAt: Date.now(),
         };
@@ -988,6 +1008,12 @@ const SCORE_AUDIO_DEFAULTS = {
     // null, same as it was when created (see render()'s own comment on why that's fine).
     function resumeDocument(doc) {
         try {
+            // A document persisted before plan.md §26 has no metadata.keyChanges at all --
+            // backfill a single beat-0 entry so the picker's per-position key lookup doesn't
+            // choke on stale localStorage from an earlier session.
+            if (doc.metadata && !doc.metadata.keyChanges) {
+                doc.metadata.keyChanges = [{ atBeat: 0, keyFifths: doc.metadata.keyFifths || 0 }];
+            }
             currentXml = doc.sourceXml || null;
             currentResult = currentXml ? WebApi.importSummary(currentXml) : null;
             currentDoc = doc;

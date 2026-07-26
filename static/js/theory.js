@@ -178,3 +178,17 @@ export function countChromaticPitchClasses(pitchClasses, keyFifths) {
     const diatonic = getKeyDiatonicPitchClasses(keyFifths);
     return pitchClasses.filter(pc => !diatonic.has(((pc % 12) + 12) % 12)).length;
 }
+
+/** Resolves the key signature (a `keyFifths` int) actually in effect at [beat], given a piece's
+    full [keyChanges] list -- `[{atBeat, keyFifths}, ...]`, sorted ascending, as produced by the
+    Kotlin engine's `ScoreMetadata.keyChanges` (plan.md §26, mid-piece key signature changes).
+    Used by the chord picker to rank a chord against the key actually active where it sits in the
+    piece, rather than the score's beat-0 key for every chord regardless of position. */
+export function keyFifthsAtBeat(keyChanges, beat) {
+    let active = keyChanges[0]?.keyFifths ?? 0;
+    for (const change of keyChanges) {
+        if (change.atBeat <= beat + 1e-9) active = change.keyFifths;
+        else break;
+    }
+    return active;
+}
