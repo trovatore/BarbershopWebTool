@@ -1,5 +1,5 @@
-/* Service Worker for Offline Mode Serial: #003 */
-const CACHE_NAME = 'barbershop-calculator-v3';
+/* Service Worker for Offline Mode Serial: #004 */
+const CACHE_NAME = 'barbershop-calculator-v4';
 // Paths are relative to this script's own URL (always the site root), not origin-absolute --
 // origin-absolute paths would resolve to the wrong place under a GitHub Pages project subpath
 // (e.g. https://user.github.io/repo/).
@@ -31,7 +31,13 @@ self.addEventListener('install', (event) => {
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(clients.claim());
+  event.waitUntil(
+    caches.keys()
+      .then((names) => Promise.all(
+        names.filter((name) => name !== CACHE_NAME).map((name) => caches.delete(name))
+      ))
+      .then(() => clients.claim())
+  );
 });
 
 self.addEventListener('fetch', (event) => {

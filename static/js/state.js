@@ -82,13 +82,13 @@ export const appState = {
     },
     settings: {
         intonation: 'just',
-        vps: 4,
+        vps: 2,
         duration: 5,
         volume: 0.05,
         presetVersion: 'ear',
         audio: {
             vibratoJitterCutoff: 100, vibratoJitterAmount: 2.5,
-            phaseJitter: 0.08, vibratoDepth: 0.006,
+            phaseJitter: 0.08, vibratoDepth: 0.002,
             vibratoRateMean: 5.2, vibratoRateRange: 1.2,
             q1: 10, q2: 15
         },
@@ -136,7 +136,7 @@ export function syncInputsToState() {
     });
 
     const vps = document.getElementById('vpsCount');
-    if (vps) appState.settings.vps = parseInt(vps.value) || 4;
+    if (vps) appState.settings.vps = parseInt(vps.value) || 2;
     
     const dur = document.getElementById('duration');
     if (dur) appState.settings.duration = parseFloat(dur.value) || 5;
@@ -310,7 +310,7 @@ export function loadStateFromURL() {
         const freqs = presets[chord.vowel];
         if (freqs) [chord.formants.f1, chord.formants.f2, chord.formants.f3] = freqs;
     }
-    if (params.has('vps')) appState.settings.vps = parseInt(params.get('vps')) || 4;
+    if (params.has('vps')) appState.settings.vps = parseInt(params.get('vps')) || 2;
 
     if (params.has('a')) {
         params.get('a').split(',').forEach(pair => {

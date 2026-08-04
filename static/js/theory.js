@@ -87,7 +87,25 @@ export function analyzeChord(notes, options = {}) {
         }
     }
 
-    if (!bestMatch) return { common_name: "Unknown Chord", inversion: "N/A", voicing: currentVoicing, notes: [] };
+    // Unrecognized chord shape -- still real voices with real notes, just no harmonic role to
+    // hang a just/Pythagorean offset off of. `notes: []` here used to make main.js's tuning-scatter
+    // guard (`data.notes.forEach(...)`) silently do nothing, leaving chord.tuning frozen at
+    // whatever it was before -- reproduced live with an "Unknown Chord" (G3/C4/D4/F4) already
+    // sitting in localStorage: every intonation radio, including Equal, appeared to do nothing.
+    // Equal temperament needs no role at all (always 0 cents), and just/Pythagorean have nothing
+    // sensible to compute without a root, so 0.0 for every voice is the correct answer here, not a
+    // fallback to avoid.
+    if (!bestMatch) return {
+        common_name: "Unknown Chord",
+        inversion: "N/A",
+        voicing: currentVoicing,
+        notes: pObjs.map(p => ({
+            part: ["Bass", "Bari", "Lead", "Tenor"][p.idx],
+            note: p.name,
+            role: "Unknown",
+            tuning: 0.0
+        }))
+    };
 
     let tuningRootPC = rootPC;
     let virtualRootMode = false;

@@ -25,10 +25,10 @@ window.addEventListener('pointerdown', primeAudioContext, { once: true, capture:
 // Chord page's own hardcoded defaults for the same reason.
 const SCORE_AUDIO_DEFAULTS = {
     vibratoJitterCutoff: 100, vibratoJitterAmount: 2.5,
-    phaseJitter: 0.08, vibratoDepth: 0.006,
+    phaseJitter: 0.08, vibratoDepth: 0.002,
     vibratoRateMean: 5.2, vibratoRateRange: 1.2,
     q1: 10, q2: 15,
-    vps: 4, volume: 0.05,
+    vps: 2, volume: 0.05,
 };
 
 (function () {
