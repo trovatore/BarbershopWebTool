@@ -195,7 +195,7 @@ function renderUI() {
 
     const chord = appState.chords[appState.activeChordIndex];
     renderControls(container, chord.voices, appState.ui.selectedIdx, chord.tuning, manualUpdate, updateNote, cycleEnharmonic, appState.settings.partSettings);
-    drawChord("notation", chord.voices, appState.ui.scoreChordKeyFifths);
+    drawChord("notation", chord.voices);
     
     syncStateToInputs();
 
@@ -279,7 +279,7 @@ function applyDetectedVoices(notes) {
         const idx = WAV_PART_TO_VOICE_IDX[n.part];
         if (idx === undefined) return;
         const guessOct = Math.floor(n.app_semitone / 12);
-        const spelled = getVariations(n.app_semitone, guessOct, context, appState.ui.scoreChordKeyFifths)[0];
+        const spelled = getVariations(n.app_semitone, guessOct, context)[0];
         chord.voices[idx] = Object.assign({}, chord.voices[idx], spelled, { rest: false });
         chord.tuning[idx] = n.cents;
         context.push({ step: spelled.step, semi: n.app_semitone });
@@ -335,7 +335,7 @@ export function updateNote(idx, semiChange) {
     // rest: false -- bumping a resting voice's pitch (its placeholder, since that's all it has)
     // is a deliberate edit and should bring it back in, same reasoning as manualUpdate's real-note
     // branch below.
-    chord.voices[idx] = Object.assign({}, chord.voices[idx], getVariations(getAbsSemitone(chord.voices[idx]) + semiChange, chord.voices[idx].oct, context, appState.ui.scoreChordKeyFifths)[0], { rest: false });
+    chord.voices[idx] = Object.assign({}, chord.voices[idx], getVariations(getAbsSemitone(chord.voices[idx]) + semiChange, chord.voices[idx].oct, context)[0], { rest: false });
     triggerMutation();
 }
 
@@ -361,7 +361,7 @@ export function manualUpdate(idx, val) {
         const oct = parseInt(match[3]);
         pushChordUndo();
         const context = chord.voices.map((s, i) => ({ step: s.step, semi: getAbsSemitone(s), idx: i })).filter(n => n.idx !== idx);
-        chord.voices[idx] = Object.assign({}, chord.voices[idx], getVariations((oct * 12) + STEP_TO_SEMI[step] + acc, chord.voices[idx].oct, context, appState.ui.scoreChordKeyFifths)[0], { rest: false });
+        chord.voices[idx] = Object.assign({}, chord.voices[idx], getVariations((oct * 12) + STEP_TO_SEMI[step] + acc, chord.voices[idx].oct, context)[0], { rest: false });
         triggerMutation();
     }
 }
@@ -369,7 +369,7 @@ export function manualUpdate(idx, val) {
 export function cycleEnharmonic(idx) {
     const chord = appState.chords[appState.activeChordIndex];
     pushChordUndo();
-    const vars = getVariations(getAbsSemitone(chord.voices[idx]), chord.voices[idx].oct, chord.voices.map((s, i) => ({ step: s.step, semi: getAbsSemitone(s), idx: i })).filter(n => n.idx !== idx), appState.ui.scoreChordKeyFifths);
+    const vars = getVariations(getAbsSemitone(chord.voices[idx]), chord.voices[idx].oct, chord.voices.map((s, i) => ({ step: s.step, semi: getAbsSemitone(s), idx: i })).filter(n => n.idx !== idx));
     let curIdx = vars.findIndex(v => v.step === chord.voices[idx].step && v.acc === chord.voices[idx].acc && v.oct === chord.voices[idx].oct);
     chord.voices[idx] = Object.assign({}, chord.voices[idx], vars[(curIdx + 1) % vars.length], { rest: false });
     triggerMutation();
@@ -388,7 +388,7 @@ let revoiceVoices = null;
 let revoiceTuning = null;
 
 function renderRevoiceDialog() {
-    drawChord('revoiceNotation', revoiceVoices, appState.ui.scoreChordKeyFifths);
+    drawChord('revoiceNotation', revoiceVoices);
 
     const swapsEl = document.getElementById('revoiceSwaps');
     if (swapsEl) {
@@ -420,7 +420,7 @@ function renderRevoiceDialog() {
             btn.onclick = () => {
                 const idx = parseInt(btn.dataset.octIdx, 10);
                 const dir = parseInt(btn.dataset.octDir, 10);
-                revoiceVoices = bumpOctave(revoiceVoices, idx, dir, appState.ui.scoreChordKeyFifths);
+                revoiceVoices = bumpOctave(revoiceVoices, idx, dir);
                 renderRevoiceDialog();
             };
         });
@@ -629,7 +629,7 @@ function init() {
         handleGlobalKey(e,
             { selectedIdx: appState.ui.selectedIdx, isTyping: document.activeElement.tagName === 'INPUT' },
             {
-                updateNote, cycleEnharmonic, renderUI, manualUpdate,
+                updateNote, cycleEnharmonic, renderUI,
                 playChord: () => {
                    const btn = document.getElementById('playBtn');
                    if (btn) btn.click();

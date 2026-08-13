@@ -1,11 +1,8 @@
-/* state.js Serial: #013 */
+/* state.js Serial: #012 */
 import { STR_TO_ACC, ACC_TO_STR } from './spelling.js';
 import { readScoreDocument, writeScoreDocument, SCORE_STORAGE_KEY } from './score-store.js';
 import { readChordDocument, writeChordDocument, CHORD_STORAGE_KEY } from './chord-store.js';
 import { createDocumentStore } from './document-store.js';
-// theory.js only imports from spelling.js, never from state.js, so this direction is safe --
-// no circular dependency (plan.md §33).
-import { keyFifthsAtBeat } from './theory.js';
 
 // This tab's own store instance for reading score:current's dirty state (plan.md §10.7.4) --
 // never used for undo/redo here (a ?sid= Chord-editor tab's undo stack is local to that one
@@ -55,22 +52,6 @@ const AUDIO_MAP = {
 
 const PART_PROPS = { 'p': 'ping', 't': 'tilt', '4': 'f4', '5': 'f5' };
 
-// Single source of truth for the Chord page's audio-engine defaults (plan.md §37) -- seeds
-// appState.settings below, and is also imported directly by score.js to build its own
-// SCORE_AUDIO_DEFAULTS, so changing a default now only needs an edit here. `/score` still needs
-// its *own* independent, stable snapshot rather than reading live appState.settings directly --
-// it has no UI for these (score.js's own comment on SCORE_AUDIO_DEFAULTS explains why), so it
-// must not start reflecting a one-off customization someone made on the Chord page.
-export const AUDIO_DEFAULTS = {
-    vps: 2, volume: 0.05,
-    audio: {
-        vibratoJitterCutoff: 100, vibratoJitterAmount: 2.5,
-        phaseJitter: 0.08, vibratoDepth: 0.002,
-        vibratoRateMean: 5.2, vibratoRateRange: 1.2,
-        q1: 10, q2: 15
-    }
-};
-
 export const appState = {
     chords: [{
         voices: [
@@ -84,11 +65,6 @@ export const appState = {
         // alongside it rather than in settings.audio, since the vowel *is* the formant triple.
         vowel: 'a',
         formants: { f1: 730, f2: 1090, f3: 2440 },
-        // A pillar-chord designation is a /score-only concept (plan.md §40.3) -- null here on the
-        // standalone Chord page's default chord, same as it has no key-signature concept either
-        // (plan.md §33). A ?sid= tab replaces this whole object with doc.chords[idx] wholesale
-        // (state.js's loadStateFromURL()), which already carries the real value through untouched.
-        pillarChord: null,
         analysis: null
     }],
     activeChordIndex: 0,
@@ -102,23 +78,20 @@ export const appState = {
         // null means "editing the global default" — see the §8 Q2 labeling this drives.
         editingScoreChordId: null,
         scoreChordPosition: null,
-        scoreChordNotFound: false,
-        // The key signature actually active at this chord's own position in the score (plan.md
-        // §33) -- 0 when not editing a Score chord (the standalone Chord page has no key concept
-        // at all), resolved once at ?sid= load time and threaded into every note-spelling/
-        // grandstaff call in main.js from here.
-        scoreChordKeyFifths: 0
+        scoreChordNotFound: false
     },
     settings: {
         intonation: 'just',
-        vps: AUDIO_DEFAULTS.vps,
+        vps: 2,
         duration: 5,
-        volume: AUDIO_DEFAULTS.volume,
+        volume: 0.05,
         presetVersion: 'ear',
-        // A fresh copy, not a shared reference -- syncInputsToState() mutates settings.audio
-        // in place (appState.settings.audio[key] = ...), which would silently corrupt
-        // AUDIO_DEFAULTS itself if this were the same object.
-        audio: { ...AUDIO_DEFAULTS.audio },
+        audio: {
+            vibratoJitterCutoff: 100, vibratoJitterAmount: 2.5,
+            phaseJitter: 0.08, vibratoDepth: 0.002,
+            vibratoRateMean: 5.2, vibratoRateRange: 1.2,
+            q1: 10, q2: 15
+        },
         partSettings: [
             { name: 'Bass', f4: 3500, f5: 4500, ping: 0.0, tilt: 0.0, volume: 1.0, mute: false },
             { name: 'Bari', f4: 3500, f5: 4500, ping: 0.0, tilt: 0.0, volume: 1.0, mute: false },
@@ -163,7 +136,7 @@ export function syncInputsToState() {
     });
 
     const vps = document.getElementById('vpsCount');
-    if (vps) appState.settings.vps = parseInt(vps.value) || AUDIO_DEFAULTS.vps;
+    if (vps) appState.settings.vps = parseInt(vps.value) || 2;
     
     const dur = document.getElementById('duration');
     if (dur) appState.settings.duration = parseFloat(dur.value) || 5;
@@ -295,17 +268,6 @@ export function loadStateFromURL() {
             appState.ui.editingScoreChordId = sid;
             appState.ui.scoreChordPosition = { index: idx, total: doc.chords.length };
             appState.ui.scoreChordNotFound = false;
-            // Resolve this chord's own local key (plan.md §33), same running-beat-accumulator +
-            // keyFifthsAtBeat pattern score.js's picker already uses -- resolved once here, not
-            // per-edit, since a chord's position within the score doesn't change while editing it
-            // in a ?sid= tab. A document persisted before §26 has no keyChanges at all -- back it
-            // off to a single beat-0 entry, same defensive fallback score.js's resumeDocument()
-            // already uses for the same reason.
-            const keyChanges = (doc.metadata && doc.metadata.keyChanges) ||
-                [{ atBeat: 0, keyFifths: (doc.metadata && doc.metadata.keyFifths) || 0 }];
-            let pos = 0;
-            for (let i = 0; i < idx; i++) pos += doc.chords[i].beats;
-            appState.ui.scoreChordKeyFifths = keyFifthsAtBeat(keyChanges, pos);
         } else {
             appState.ui.editingScoreChordId = sid;
             appState.ui.scoreChordNotFound = true;
@@ -348,7 +310,7 @@ export function loadStateFromURL() {
         const freqs = presets[chord.vowel];
         if (freqs) [chord.formants.f1, chord.formants.f2, chord.formants.f3] = freqs;
     }
-    if (params.has('vps')) appState.settings.vps = parseInt(params.get('vps')) || AUDIO_DEFAULTS.vps;
+    if (params.has('vps')) appState.settings.vps = parseInt(params.get('vps')) || 2;
 
     if (params.has('a')) {
         params.get('a').split(',').forEach(pair => {

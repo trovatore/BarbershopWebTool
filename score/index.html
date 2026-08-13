@@ -28,13 +28,6 @@
         th, td { border-bottom: 1px solid #eee; padding: 6px 8px; text-align: left; }
         th { color: #666; }
         .vowel-col { width: 2.5em; text-align: center; }
-        .pillar-col { width: 5em; }
-        .pillar-input { width: 4.2em; font-size: 0.85rem; border: 1px solid transparent; background: transparent; }
-        .pillar-input:hover, .pillar-input:focus { border-color: #ccc; background: #fff; }
-        .pillar-badge { margin-left: 3px; cursor: help; }
-        .pillar-badge.consistent { color: #2a8f3f; }
-        .pillar-badge.inconsistent { color: #b3401e; }
-        .pillar-badge.unparseable { color: #a15c00; }
         .vowel-editable { cursor: pointer; }
         .vowel-editable:hover { background: #f5f6f8; text-decoration: underline dotted; }
         .vowel-picker { font-size: 0.85rem; }
@@ -121,14 +114,9 @@
     <div id="status" class="status"></div>
     <div id="summary"></div>
     <div id="warnings"></div>
-    <div class="row" style="font-size: 0.85rem;">
-        <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
-            <input type="checkbox" id="showRomanNumerals"> Show Roman numerals
-        </label>
-    </div>
     <table>
         <thead>
-            <tr><th>#</th><th>Beats</th><th>Name</th><th class="pillar-col">Pillar</th><th class="vowel-col">Vowel</th><th>Tenor</th><th>Lead</th><th>Bari</th><th>Bass</th><th></th></tr>
+            <tr><th>#</th><th>Beats</th><th>Name</th><th class="vowel-col">Vowel</th><th>Tenor</th><th>Lead</th><th>Bari</th><th>Bass</th><th></th></tr>
         </thead>
         <tbody id="chords"></tbody>
     </table>

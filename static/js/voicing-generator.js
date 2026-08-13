@@ -6,9 +6,9 @@
    to the search logic itself. Pure JS, no engine-kt/Android involvement -- this only needs to
    exist on /score. */
 import { STR_TO_ACC, getAbsSemitone, getVariations } from './spelling.js';
-import { CHORD_PATTERNS, countChromaticPitchClasses, ROLE_MAP } from './theory.js';
+import { CHORD_PATTERNS, countChromaticPitchClasses } from './theory.js';
 
-export const SERIAL = "#002";
+export const SERIAL = "#001";
 
 // Chord-name suffix -> CHORD_PATTERNS key. Root letter + accidental is parsed separately
 // (parseChordName below); this table only has to cover what's left over. Case matters where it
@@ -156,199 +156,11 @@ export const BARBERSHOPPINESS_RANK = {
 // obvious where to change it.
 const CHROMATIC_PENALTY_PER_NOTE = 1.5;
 
-// Ranking preferences for the combinatorial fixed-note search (plan.md §41.2, Mike's own asks,
-// 2026-08-12) -- same "first guess, easy to retune once there's real output to react to" spirit
-// as CHROMATIC_PENALTY_PER_NOTE above, not measured constants.
-//   - Bass prefers the chord's root or 5th over its other tones (real barbershop convention, not
-//     a hard rule -- inversions with Bass on the 3rd/7th are still valid, just ranked lower).
-//   - A doubled tone preferentially involves Bass, not two of Bari/Lead/Tenor -- a real 4-voice
-//     unison passage (all four voices on the same pitch class, common in intros) is a distinct
-//     musical idea that never arises inside this search at all (every CHORD_PATTERNS entry has
-//     3-4 *distinct* tones by definition), so this penalty applies with no exception needed.
-const BASS_OFF_ROOT_FIFTH_PENALTY = 1.0;
-const INNER_VOICE_DOUBLING_PENALTY = 1.0;
-// Folds §41.1's "prefer the exact requested octave when reachable" preference into this same
-// unified scoring pass instead of a separate hard exact/fallback branch -- a pitch-class-only
-// match can still surface (ranked lower) instead of being silently dropped whenever no exact
-// placement exists for that particular shape.
-const INEXACT_FIXED_MATCH_PENALTY = 0.5;
-
-// Every semitone within voiceIdx's own range whose pitch class is a chord tone -- or, if this
-// voice is fixed, only the semitones matching the fixed pitch class specifically (still every
-// octave of it, not one exact semitone -- an exact-octave match and a same-pitch-class
-// different-octave match both stay in play for scoreShape() below to rank between, rather than a
-// hard exact/fallback branch). Empty when the fixed pitch class isn't actually one of this
-// chord's own tones -- the one case a real chord can never reach, matching the old engine's
-// "impossible fixed constraint returns no candidates" behavior (js-tests.html 20.18).
-function voiceCandidates(voiceIdx, chordPcs, fixedSemi) {
-    const [lo, hi] = VOICE_RANGES[voiceIdx];
-    let pcsToMatch = chordPcs;
-    if (fixedSemi !== undefined) {
-        const fixedPc = pitchClass(fixedSemi);
-        if (!chordPcs.includes(fixedPc)) return [];
-        pcsToMatch = [fixedPc];
-    }
-    const candidates = [];
-    for (let s = lo; s <= hi; s++) {
-        if (pcsToMatch.includes(pitchClass(s))) candidates.push(s);
-    }
-    return candidates;
-}
-
-// The blended rankScore (plan.md §23's barbershoppiness+chromatic-penalty base, plus §41.2's new
-// bass-role/doubling/exactness terms) for one fully-assigned [Bass,Bari,Lead,Tenor] voicing.
-function scoreShape(voiceSemis, patternKey, rootPc, fifthOffset, fixedByVoice, keyFifths) {
-    const chromaticNotes = countChromaticPitchClasses(voiceSemis.map(pitchClass), keyFifths);
-    let score = BARBERSHOPPINESS_RANK[patternKey] + chromaticNotes * CHROMATIC_PENALTY_PER_NOTE;
-
-    const bassOffset = ((pitchClass(voiceSemis[0]) - rootPc) % 12 + 12) % 12;
-    const bassIsRootOrFifth = bassOffset === 0 || (fifthOffset !== undefined && bassOffset === fifthOffset);
-    if (!bassIsRootOrFifth) score += BASS_OFF_ROOT_FIFTH_PENALTY;
-
-    const pcCounts = {};
-    voiceSemis.forEach(s => {
-        const pc = pitchClass(s);
-        pcCounts[pc] = (pcCounts[pc] || 0) + 1;
-    });
-    const doubledPc = Object.keys(pcCounts).find(pc => pcCounts[pc] > 1);
-    if (doubledPc !== undefined) {
-        const doublingVoices = [0, 1, 2, 3].filter(i => pitchClass(voiceSemis[i]) === Number(doubledPc));
-        if (!doublingVoices.includes(0)) score += INNER_VOICE_DOUBLING_PENALTY;
-    }
-
-    Object.entries(fixedByVoice).forEach(([voiceStr, semi]) => {
-        if (voiceSemis[Number(voiceStr)] !== semi) score += INEXACT_FIXED_MATCH_PENALTY;
-    });
-
-    return score;
-}
-
-// Does some common rootSemiBase reproduce this exact voicing via one of the curated
-// VOICING_TEMPLATES entries? If so, the combinatorial search rediscovered one of Mike's own
-// vetted shapes -- reuse its real description/tentative flag instead of an auto-generated one.
-function matchTemplate(voiceSemis, patternKey, rootPc) {
-    for (const t of VOICING_TEMPLATES) {
-        if (t.pattern !== patternKey) continue;
-        const bases = t.offsets.map((o, i) => voiceSemis[i] - o);
-        if (bases.every(b => b === bases[0]) && pitchClass(bases[0]) === rootPc) {
-            return t;
-        }
-    }
-    return null;
-}
-
-// A plain-language description in the curated templates' own naming style ("Root position, 5th
-// doubled", "3rd in bass") for a combinatorial result that isn't one of Mike's vetted shapes.
-function autoDescription(voiceSemis, rootPc) {
-    const bassOffset = ((pitchClass(voiceSemis[0]) - rootPc) % 12 + 12) % 12;
-    const bassPart = bassOffset === 0 ? 'Root position' : `${ROLE_MAP[bassOffset]} in bass`;
-
-    const pcCounts = {};
-    voiceSemis.forEach(s => {
-        const pc = pitchClass(s);
-        pcCounts[pc] = (pcCounts[pc] || 0) + 1;
-    });
-    const doubledPc = Object.keys(pcCounts).find(pc => pcCounts[pc] > 1);
-    if (doubledPc === undefined) return bassPart;
-
-    const doubledOffset = ((Number(doubledPc) - rootPc) % 12 + 12) % 12;
-    return `${bassPart}, ${ROLE_MAP[doubledOffset]} doubled`;
-}
-
-/**
- * The fixed-note search path (plan.md §41.2, 2026-08-12) -- used only when at least one voice is
- * fixed. Considers every valid arrangement of each chord quality's own tones across the 4 voices
- * (all chord tones present, Bass lowest/Tenor highest, Bari/Lead free to cross -- same structural
- * invariants every curated template already respects), not just the ~20 hand-picked shapes in
- * VOICING_TEMPLATES. Mike's own framing: "we should see all vocab chords in which the lead is on
- * C4, even if they're not one of the 'template' voicings." Reopens a design call §10.9 originally
- * made the other way (curated-only, specifically to avoid an algorithmically-guessed doubling) --
- * this time Mike's own concrete ranking rules (scoreShape above) stand in for "vetted by ear," and
- * the curated templates aren't discarded, just reused as a description/tentative lookup (see
- * matchTemplate) for any result that happens to match one exactly.
- */
-function generateVoicingsWithFixedNotes({ pattern, rootPc, fixed, keyFifths }) {
-    const results = [];
-    const fixedByVoice = {};
-    fixed.forEach(f => { fixedByVoice[f.voice] = f.semi; });
-
-    for (const patternKey of Object.keys(CHORD_PATTERNS)) {
-        if (pattern !== undefined && patternKey !== pattern) continue;
-        const offsets = patternKey.split(',').map(Number);
-        // Whichever offset actually functions as this chord's 5th -- absent entirely for the
-        // no-fifth ninth (0,2,4,10), where Bass's preference falls back to root only, a
-        // deliberate simplification for that one quality (plan.md §41.2).
-        const fifthOffset = offsets.find(o => o === 6 || o === 7 || o === 8);
-
-        for (let candidateRootPc = 0; candidateRootPc < 12; candidateRootPc++) {
-            if (rootPc !== undefined && candidateRootPc !== rootPc) continue;
-
-            const chordPcs = [...new Set(offsets.map(o => ((candidateRootPc + o) % 12 + 12) % 12))];
-            const candidatesByVoice = [0, 1, 2, 3].map(v => voiceCandidates(v, chordPcs, fixedByVoice[v]));
-            if (candidatesByVoice.some(c => c.length === 0)) continue;
-
-            // Brute-force the small (a few hundred to ~4000) cartesian product -- trivial for a
-            // browser on a picker-search click, not a per-keystroke path (plan.md §41.2).
-            const shapes = [];
-            for (const bassSemi of candidatesByVoice[0]) {
-                for (const bariSemi of candidatesByVoice[1]) {
-                    for (const leadSemi of candidatesByVoice[2]) {
-                        for (const tenorSemi of candidatesByVoice[3]) {
-                            const voiceSemis = [bassSemi, bariSemi, leadSemi, tenorSemi];
-                            if (bassSemi !== Math.min(...voiceSemis)) continue;
-                            if (tenorSemi !== Math.max(...voiceSemis)) continue;
-                            const covered = new Set(voiceSemis.map(pitchClass));
-                            if (!chordPcs.every(pc => covered.has(pc))) continue;
-                            shapes.push(voiceSemis);
-                        }
-                    }
-                }
-            }
-
-            // Dedup to one best-ranked representative per relative shape (offsets from Bass's own
-            // semitone) -- collapses the same voicing repeated a uniform octave higher, exactly
-            // like the old per-template dedup, without collapsing two shapes that only happen to
-            // share a root/pattern but differ in which voice sings what.
-            const bestByShapeKey = new Map();
-            for (const voiceSemis of shapes) {
-                const score = scoreShape(voiceSemis, patternKey, candidateRootPc, fifthOffset, fixedByVoice, keyFifths);
-                const shapeKey = JSON.stringify(voiceSemis.map(s => s - voiceSemis[0]));
-                const existing = bestByShapeKey.get(shapeKey);
-                if (!existing || score < existing.score) {
-                    bestByShapeKey.set(shapeKey, { voiceSemis, score });
-                }
-            }
-
-            for (const { voiceSemis, score } of bestByShapeKey.values()) {
-                const template = matchTemplate(voiceSemis, patternKey, candidateRootPc);
-                results.push({
-                    pattern: patternKey,
-                    rootPc: candidateRootPc,
-                    description: template ? template.description : autoDescription(voiceSemis, candidateRootPc),
-                    tentative: template ? !!template.tentative : true,
-                    voices: spellVoices(voiceSemis),
-                    rankScore: score,
-                });
-            }
-        }
-    }
-
-    results.sort((a, b) => a.rankScore - b.rankScore);
-    return results;
-}
-
 /**
  * Generates candidate voicings, optionally filtered by quality/root and/or 1-2 fixed voice
  * pitches -- the same one search serves both "generate by name" (quality+root given, no fixed
  * notes) and "search by fixed notes" (quality/root left open) per the unified design agreed with
  * Mike, not two separate mechanisms.
- *
- * When `opts.fixed` is non-empty, delegates entirely to `generateVoicingsWithFixedNotes()` above
- * (plan.md §41.2, 2026-08-12) -- every valid arrangement of a chord's own tones, not just the
- * curated `VOICING_TEMPLATES` shapes below, since that's specifically the case Mike found the
- * curated list too narrow for. Plain by-name/root browsing (no fixed notes at all) keeps scanning
- * only the curated templates, unchanged from before -- deliberately, so casual browsing still
- * shows only Mike's own vetted shapes rather than every mathematically valid one.
  *
  * Results are ranked (plan.md §23, 2026-07-25) by a blended score: `BARBERSHOPPINESS_RANK` for
  * the quality, plus `CHROMATIC_PENALTY_PER_NOTE` for every note outside `opts.keyFifths`'s key
@@ -356,30 +168,24 @@ function generateVoicingsWithFixedNotes({ pattern, rootPc, fixed, keyFifths }) {
  * Mike asked for over a simpler "quality first, in-key only as a tiebreaker" scheme. `keyFifths`
  * checks against the score's one whole-piece key signature (plan.md §20's mid-piece-key-change
  * gap means this can't yet be more precise than that for a piece that actually changes key).
- * Deduplicated *within* each template (same pattern+rootPc+description) to just one octave
- * placement -- collapses the biggest source of clutter (the same shape repeated every octave)
- * without collapsing genuinely different named voicings across templates, even ones that happen
- * to be reachable from each other via Revoice (e.g. the major triad's "close" and "ringing
- * (2:3:4:5)" templates) -- those stay deliberately distinct, separately-selectable options, per
- * Mike's explicit call when this was raised. That one placement is normally the lowest valid
- * octave, except when `opts.fixed` is given and a higher placement exists that matches every
- * fixed voice's exact requested semitone -- see `opts.fixed` below (plan.md §41.1).
+ * Deduplicated *within* each template (same pattern+rootPc+description) to just its lowest valid
+ * octave placement -- collapses the biggest source of clutter (the same shape repeated every
+ * octave) without collapsing genuinely different named voicings across templates, even ones
+ * that happen to be reachable from each other via Revoice (e.g. the major triad's "close" and
+ * "ringing (2:3:4:5)" templates) -- those stay deliberately distinct, separately-selectable
+ * options, per Mike's explicit call when this was raised.
  *
  * @param {object} [opts]
  * @param {string} [opts.pattern] - a CHORD_PATTERNS key (e.g. "0,4,7") to restrict to one quality.
  * @param {number} [opts.rootPc] - a pitch class 0-11 to restrict to one root.
  * @param {Array<{voice: number, semi: number}>} [opts.fixed] - pitch-class constraints per voice
- *   index (0=Bass..3=Tenor) -- "the lead sings C4" means *some* C, not C4 specifically (changed
- *   2026-07-25, Mike: "I thought we were listing all chords that match the notes" -- exact-octave
- *   matching was silently excluding musically-valid quality/root matches whenever reaching the
- *   fixed voice's *exact* octave pushed some other voice out of its own range, plan.md §22/§24).
- *   Where a template has more than one valid placement, the one landing every fixed voice on its
- *   *exact* requested semitone is preferred when one exists within range; only a placement that
- *   merely matches by pitch class (a different octave than asked for) is returned otherwise
- *   (fixed 2026-08-06, plan.md §41.1 -- the dedup below used to keep whichever placement it
- *   scanned first regardless of exactness, silently discarding a real exact match found later in
- *   the same scan). A voice can still land in a different octave than requested when no exact
- *   placement is reachable at all -- Revoice's octave-bump remains the way to reach it from there.
+ *   index (0=Bass..3=Tenor) -- "the lead sings C4" means *some* C, matched against whichever
+ *   octave a template naturally lands that voice in, not C4 specifically (changed 2026-07-25,
+ *   Mike: "I thought we were listing all chords that match the notes" -- exact-octave matching
+ *   was silently excluding musically-valid quality/root matches whenever reaching the fixed
+ *   voice's *exact* octave pushed some other voice out of its own range, same failure mode twice
+ *   over in plan.md §22/§24). A voice landing in a different octave than what's actually in the
+ *   current chord is expected -- Revoice's octave-bump moves it to the exact target afterward.
  * @param {number} [opts.keyFifths] - the score's key signature (MusicXML <fifths> convention),
  *   for in-key/chromatic ranking. Defaults to 0 (no sharps/flats) if omitted.
  * @returns {Array<{pattern: string, rootPc: number, description: string, tentative: boolean,
@@ -388,12 +194,8 @@ function generateVoicingsWithFixedNotes({ pattern, rootPc, fixed, keyFifths }) {
  */
 export function generateVoicings(opts = {}) {
     const { pattern, rootPc, fixed = [], keyFifths = 0 } = opts;
-
-    if (fixed.length > 0) {
-        return generateVoicingsWithFixedNotes({ pattern, rootPc, fixed, keyFifths });
-    }
-
     const results = [];
+    const seenTemplateKeys = new Set();
 
     for (const template of VOICING_TEMPLATES) {
         if (pattern !== undefined && template.pattern !== pattern) continue;
@@ -401,19 +203,10 @@ export function generateVoicings(opts = {}) {
         for (let candidateRootPc = 0; candidateRootPc < 12; candidateRootPc++) {
             if (rootPc !== undefined && candidateRootPc !== rootPc) continue;
 
-            // Scan every octave placement of this (template, root) once, keeping at most one
-            // result -- every other placement is the exact same voicing shape an octave (or more)
-            // higher, not a musically distinct option. Prefer the first (lowest) placement where
-            // every fixed voice lands on its *exact* requested semitone, if one exists within
-            // range; only fall back to the first placement that merely matches by pitch class
-            // (plan.md §25) when no exact placement is reachable at all. Without this, a
-            // pitch-class-only match scanned earlier (lower) could win by default and silently
-            // discard an exact match found later in the same scan -- a real interaction between
-            // this dedup and §25's relaxation, not by design (plan.md §41.1). When `fixed` is
-            // empty, `every()` over it is vacuously true, so the very first in-range placement is
-            // immediately both the exact and fallback match -- unchanged from before.
-            let exactMatch = null;
-            let fallbackMatch = null;
+            // Only the lowest valid octave placement per (template, root) survives when nothing
+            // fixes a specific pitch -- every other placement is the exact same voicing shape an
+            // octave (or more) higher, not a musically distinct option.
+            const templateKey = `${template.pattern}|${candidateRootPc}|${template.description}`;
 
             // Scan root placements across several octaves -- VOICE_RANGES bounds which ones
             // actually survive, brute force is fine given how small this search space is (a few
@@ -422,28 +215,19 @@ export function generateVoicings(opts = {}) {
                 const voiceSemis = template.offsets.map(o => rootSemi + o);
                 if (!voiceSemis.every((s, i) => withinRange(s, i))) continue;
                 if (!fixed.every(f => pitchClass(voiceSemis[f.voice]) === pitchClass(f.semi))) continue;
+                if (seenTemplateKeys.has(templateKey)) continue;
+                seenTemplateKeys.add(templateKey);
 
-                if (!fallbackMatch) fallbackMatch = voiceSemis;
-                if (fixed.every(f => voiceSemis[f.voice] === f.semi)) {
-                    exactMatch = voiceSemis;
-                    break; // unique -- a template's fixed voice(s) can only land on their exact
-                            // requested semitone(s) at one rootSemi per octave scan, so no later
-                            // placement could be a "better" exact match than this one.
-                }
+                const chromaticNotes = countChromaticPitchClasses(voiceSemis.map(pitchClass), keyFifths);
+                results.push({
+                    pattern: template.pattern,
+                    rootPc: candidateRootPc,
+                    description: template.description,
+                    tentative: !!template.tentative,
+                    voices: spellVoices(voiceSemis),
+                    rankScore: BARBERSHOPPINESS_RANK[template.pattern] + chromaticNotes * CHROMATIC_PENALTY_PER_NOTE,
+                });
             }
-
-            const voiceSemis = exactMatch || fallbackMatch;
-            if (!voiceSemis) continue;
-
-            const chromaticNotes = countChromaticPitchClasses(voiceSemis.map(pitchClass), keyFifths);
-            results.push({
-                pattern: template.pattern,
-                rootPc: candidateRootPc,
-                description: template.description,
-                tentative: !!template.tentative,
-                voices: spellVoices(voiceSemis),
-                rankScore: BARBERSHOPPINESS_RANK[template.pattern] + chromaticNotes * CHROMATIC_PENALTY_PER_NOTE,
-            });
         }
     }
 

@@ -1,35 +1,18 @@
-/* notation.js Serial: #030 */
+/* notation.js Serial: #029 */
 const { Renderer, Stave, StaveNote, Voice, Formatter, Accidental, StaveConnector } = Vex.Flow;
 import { ACC_TO_STR } from './spelling.js';
 
-export const SERIAL = "#030";
+export const SERIAL = "#029";
 
-// Standard circle-of-fifths major-key names, the format VexFlow's Stave.addKeySignature expects
-// (plan.md §33) -- keyFifths follows this app's own MusicXML <fifths> convention (positive =
-// sharps, negative = flats), same indexing theory.js's tonic-pitch-class formula uses.
-const KEY_SPEC_BY_FIFTHS = {
-    "-7": "Cb", "-6": "Gb", "-5": "Db", "-4": "Ab", "-3": "Eb", "-2": "Bb", "-1": "F",
-    "0": "C", "1": "G", "2": "D", "3": "A", "4": "E", "5": "B", "6": "F#", "7": "C#",
-};
-
-export function drawChord(divId, chordState, keyFifths = 0) {
+export function drawChord(divId, chordState) {
     const div = document.getElementById(divId);
     div.innerHTML = "";
     const renderer = new Renderer(div, Renderer.Backends.SVG);
     renderer.resize(740, 320);
     const context = renderer.getContext();
-
-    // keyFifths=0 (the default -- no key context, e.g. the standalone Chord page) draws no key
-    // signature at all, matching this function's exact prior behavior (plan.md §33).
-    const keySpec = keyFifths ? KEY_SPEC_BY_FIFTHS[String(keyFifths)] : null;
-    let topStave = new Stave(100, 50, 500).addClef("treble", "default", "8vb");
-    let botStave = new Stave(100, 180, 500).addClef("bass");
-    if (keySpec) {
-        topStave = topStave.addKeySignature(keySpec);
-        botStave = botStave.addKeySignature(keySpec);
-    }
-    topStave = topStave.setContext(context).draw();
-    botStave = botStave.setContext(context).draw();
+    
+    const topStave = new Stave(100, 50, 500).addClef("treble", "default", "8vb").setContext(context).draw();
+    const botStave = new Stave(100, 180, 500).addClef("bass").setContext(context).draw();
     new StaveConnector(topStave, botStave).setType(StaveConnector.type.BRACE).setContext(context).draw();
 
     const makeNote = (noteObj, stem, clef, forceNatural, isUnison, xShift = 0) => {
