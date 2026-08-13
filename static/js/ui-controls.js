@@ -89,7 +89,7 @@ export function renderControls(container, chordState, selectedIdx, tuningState, 
  */
 export function handleGlobalKey(e, state, callbacks) {
     const { selectedIdx, isTyping } = state;
-    const { updateNote, cycleEnharmonic, renderUI, playChord, navigate } = callbacks;
+    const { updateNote, cycleEnharmonic, renderUI, playChord, navigate, manualUpdate } = callbacks;
 
     // Navigation (Arrows) always terminate typing and move voice
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
@@ -116,6 +116,18 @@ export function handleGlobalKey(e, state, callbacks) {
                 input.setSelectionRange(1, 1);
             }, 10);
         }
+        return;
+    }
+
+    // Rest (plan.md §28, 2026-08-06): "R" without a voice focused used to do nothing at all --
+    // it isn't a note letter (excluded from the A-G quick-entry match above on purpose), and
+    // manualUpdate()'s own "R" rest-toggle (§19) was only ever reachable by actually typing into
+    // the focused note field. A rest needs no further keystrokes the way a note letter invites
+    // (accidental/octave still to come), so this acts immediately -- direct-action, like
+    // ArrowUp/ArrowDown/Enter below, not focus-and-prefill like the A-G/0-9 blocks.
+    if (e.key.match(/^r$/i)) {
+        e.preventDefault();
+        manualUpdate(selectedIdx, 'R');
         return;
     }
 
