@@ -3,7 +3,7 @@ import { getAbsSemitone, getVariations, STR_TO_ACC, STEP_TO_SEMI, SERIAL as S_SP
 import { renderControls, handleGlobalKey, SERIAL as S_UI } from './ui-controls.js';
 import { drawChord, SERIAL as S_NOT } from './notation.js';
 import { playChord, saveChordAsWav, analyzeAndShow, primeAudioContext, SERIAL as S_AUD } from './audio.js';
-import { analyzeChord, SERIAL as S_THY } from './theory.js';
+import { analyzeChord, getRomanNumeral, SERIAL as S_THY } from './theory.js';
 import { appState, syncInputsToState, syncStateToInputs, loadStateFromURL, generatePermalink, getNoteString, syncChordToScoreDocument, syncChordToStandaloneDocument, isScoreDocumentDirty, isChordDocumentDirty, establishFreshChordBaseline, chordDocStore, VOWEL_PRESETS_LEGACY, VOWEL_PRESETS_EAR } from './state.js';
 import { createDocumentStore } from './document-store.js';
 import { readChordDocument } from './chord-store.js';
@@ -104,11 +104,21 @@ async function fetchAnalysis() {
     const currentId = ++appState.ui.analysisId;
     const chord = appState.chords[appState.activeChordIndex];
     const noteStrs = chord.voices.map(s => getNoteString(s));
+    // Roman-numeral display (plan.md §34) is a purely client-side, key-aware concept the Python
+    // backend's analyzer (engine/analyzer.py, music21-based) has no notion of at all -- it never
+    // returns a roman_numeral field, so the online path below backfills one locally. keyFifths
+    // must also be threaded through explicitly (plan.md §33's own scoreChordKeyFifths) -- every
+    // analyzeChord() call here used to default to 0/C-major, silently mislabeling any chord in a
+    // non-C key whenever the analysis ran offline or the backend fetch failed (plan.md §44 item 3,
+    // hand-traced: keyFifths=0 reproduces the reported "II7" for a chord whose real answer, in
+    // G major, is "V7").
+    const keyFifths = appState.ui.scoreChordKeyFifths;
 
     if (appState.ui.offlineMode) {
-        const data = analyzeChord(noteStrs, { 
-            allow_rootless: appState.ui.rootless, 
-            tuning_style: appState.settings.intonation 
+        const data = analyzeChord(noteStrs, {
+            allow_rootless: appState.ui.rootless,
+            tuning_style: appState.settings.intonation,
+            keyFifths
         });
         updateAnalysisResult(data, chord);
         return;
@@ -120,16 +130,23 @@ async function fetchAnalysis() {
     if (pendingEl) pendingEl.style.display = 'inline';
 
     try {
-        const res = await fetch('/analyze', { 
-            method: 'POST', headers: {'Content-Type': 'application/json'}, 
-            body: JSON.stringify({ 
-                notes: noteStrs, 
-                allow_rootless: appState.ui.rootless, 
-                tuning_style: appState.settings.intonation 
-            }) 
+        const res = await fetch('/analyze', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                notes: noteStrs,
+                allow_rootless: appState.ui.rootless,
+                tuning_style: appState.settings.intonation
+            })
         });
         const data = await res.json();
         if (currentId === appState.ui.analysisId && !data.error) {
+            // The backend's own response never has this field (see comment above) -- overlay the
+            // client-side theory engine's roman_numeral on top of it, everything else untouched.
+            data.roman_numeral = analyzeChord(noteStrs, {
+                allow_rootless: appState.ui.rootless,
+                tuning_style: appState.settings.intonation,
+                keyFifths
+            }).roman_numeral;
             updateAnalysisResult(data, chord);
         }
     } catch (e) {
@@ -137,7 +154,8 @@ async function fetchAnalysis() {
         if (currentId === appState.ui.analysisId) {
             const data = analyzeChord(noteStrs, {
                 allow_rootless: appState.ui.rootless,
-                tuning_style: appState.settings.intonation
+                tuning_style: appState.settings.intonation,
+                keyFifths
             });
             updateAnalysisResult(data, chord);
         }
@@ -195,7 +213,7 @@ function renderUI() {
 
     const chord = appState.chords[appState.activeChordIndex];
     renderControls(container, chord.voices, appState.ui.selectedIdx, chord.tuning, manualUpdate, updateNote, cycleEnharmonic, appState.settings.partSettings);
-    drawChord("notation", chord.voices);
+    drawChord("notation", chord.voices, appState.ui.scoreChordKeyFifths);
     
     syncStateToInputs();
 
@@ -279,7 +297,7 @@ function applyDetectedVoices(notes) {
         const idx = WAV_PART_TO_VOICE_IDX[n.part];
         if (idx === undefined) return;
         const guessOct = Math.floor(n.app_semitone / 12);
-        const spelled = getVariations(n.app_semitone, guessOct, context)[0];
+        const spelled = getVariations(n.app_semitone, guessOct, context, appState.ui.scoreChordKeyFifths)[0];
         chord.voices[idx] = Object.assign({}, chord.voices[idx], spelled, { rest: false });
         chord.tuning[idx] = n.cents;
         context.push({ step: spelled.step, semi: n.app_semitone });
@@ -335,7 +353,7 @@ export function updateNote(idx, semiChange) {
     // rest: false -- bumping a resting voice's pitch (its placeholder, since that's all it has)
     // is a deliberate edit and should bring it back in, same reasoning as manualUpdate's real-note
     // branch below.
-    chord.voices[idx] = Object.assign({}, chord.voices[idx], getVariations(getAbsSemitone(chord.voices[idx]) + semiChange, chord.voices[idx].oct, context)[0], { rest: false });
+    chord.voices[idx] = Object.assign({}, chord.voices[idx], getVariations(getAbsSemitone(chord.voices[idx]) + semiChange, chord.voices[idx].oct, context, appState.ui.scoreChordKeyFifths)[0], { rest: false });
     triggerMutation();
 }
 
@@ -361,7 +379,7 @@ export function manualUpdate(idx, val) {
         const oct = parseInt(match[3]);
         pushChordUndo();
         const context = chord.voices.map((s, i) => ({ step: s.step, semi: getAbsSemitone(s), idx: i })).filter(n => n.idx !== idx);
-        chord.voices[idx] = Object.assign({}, chord.voices[idx], getVariations((oct * 12) + STEP_TO_SEMI[step] + acc, chord.voices[idx].oct, context)[0], { rest: false });
+        chord.voices[idx] = Object.assign({}, chord.voices[idx], getVariations((oct * 12) + STEP_TO_SEMI[step] + acc, chord.voices[idx].oct, context, appState.ui.scoreChordKeyFifths)[0], { rest: false });
         triggerMutation();
     }
 }
@@ -369,7 +387,7 @@ export function manualUpdate(idx, val) {
 export function cycleEnharmonic(idx) {
     const chord = appState.chords[appState.activeChordIndex];
     pushChordUndo();
-    const vars = getVariations(getAbsSemitone(chord.voices[idx]), chord.voices[idx].oct, chord.voices.map((s, i) => ({ step: s.step, semi: getAbsSemitone(s), idx: i })).filter(n => n.idx !== idx));
+    const vars = getVariations(getAbsSemitone(chord.voices[idx]), chord.voices[idx].oct, chord.voices.map((s, i) => ({ step: s.step, semi: getAbsSemitone(s), idx: i })).filter(n => n.idx !== idx), appState.ui.scoreChordKeyFifths);
     let curIdx = vars.findIndex(v => v.step === chord.voices[idx].step && v.acc === chord.voices[idx].acc && v.oct === chord.voices[idx].oct);
     chord.voices[idx] = Object.assign({}, chord.voices[idx], vars[(curIdx + 1) % vars.length], { rest: false });
     triggerMutation();
@@ -388,7 +406,7 @@ let revoiceVoices = null;
 let revoiceTuning = null;
 
 function renderRevoiceDialog() {
-    drawChord('revoiceNotation', revoiceVoices);
+    drawChord('revoiceNotation', revoiceVoices, appState.ui.scoreChordKeyFifths);
 
     const swapsEl = document.getElementById('revoiceSwaps');
     if (swapsEl) {
@@ -420,7 +438,7 @@ function renderRevoiceDialog() {
             btn.onclick = () => {
                 const idx = parseInt(btn.dataset.octIdx, 10);
                 const dir = parseInt(btn.dataset.octDir, 10);
-                revoiceVoices = bumpOctave(revoiceVoices, idx, dir);
+                revoiceVoices = bumpOctave(revoiceVoices, idx, dir, appState.ui.scoreChordKeyFifths);
                 renderRevoiceDialog();
             };
         });
@@ -629,7 +647,7 @@ function init() {
         handleGlobalKey(e,
             { selectedIdx: appState.ui.selectedIdx, isTyping: document.activeElement.tagName === 'INPUT' },
             {
-                updateNote, cycleEnharmonic, renderUI,
+                updateNote, cycleEnharmonic, renderUI, manualUpdate,
                 playChord: () => {
                    const btn = document.getElementById('playBtn');
                    if (btn) btn.click();

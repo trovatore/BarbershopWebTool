@@ -41,14 +41,15 @@ export function swapVoices(voices, tuning, idxA, idxB) {
  * false-relation-aware logic every other note edit in this app uses (spelling.js's
  * getVariations()) — identical math to main.js's updateNote(idx, ±12), just returning a new array
  * instead of mutating appState directly, so a staged preview can call it repeatedly without
- * touching the real chord until Apply.
+ * touching the real chord until Apply. [keyFifths] (plan.md §33) biases the respelling toward the
+ * given key's own preferred accidentals -- 0/omitted keeps the prior key-agnostic behavior.
  */
-export function bumpOctave(voices, idx, direction) {
+export function bumpOctave(voices, idx, direction, keyFifths = 0) {
     const v = voices[idx];
     const context = voices
         .map((s, i) => ({ step: s.step, semi: getAbsSemitone(s), idx: i }))
         .filter(n => n.idx !== idx);
     const newVoices = voices.slice();
-    newVoices[idx] = Object.assign({}, v, getVariations(getAbsSemitone(v) + direction * 12, v.oct, context)[0]);
+    newVoices[idx] = Object.assign({}, v, getVariations(getAbsSemitone(v) + direction * 12, v.oct, context, keyFifths)[0]);
     return newVoices;
 }

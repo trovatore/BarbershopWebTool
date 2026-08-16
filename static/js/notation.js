@@ -1,18 +1,41 @@
-/* notation.js Serial: #029 */
+/* notation.js Serial: #030 */
 const { Renderer, Stave, StaveNote, Voice, Formatter, Accidental, StaveConnector } = Vex.Flow;
-import { ACC_TO_STR } from './spelling.js';
+import { ACC_TO_STR, keySignatureAlterations } from './spelling.js';
 
-export const SERIAL = "#029";
+export const SERIAL = "#030";
 
-export function drawChord(divId, chordState) {
+// Standard circle-of-fifths major-key names, the format VexFlow's Stave.addKeySignature expects
+// (plan.md §33) -- keyFifths follows this app's own MusicXML <fifths> convention (positive =
+// sharps, negative = flats), same indexing theory.js's tonic-pitch-class formula uses.
+const KEY_SPEC_BY_FIFTHS = {
+    "-7": "Cb", "-6": "Gb", "-5": "Db", "-4": "Ab", "-3": "Eb", "-2": "Bb", "-1": "F",
+    "0": "C", "1": "G", "2": "D", "3": "A", "4": "E", "5": "B", "6": "F#", "7": "C#",
+};
+
+export function drawChord(divId, chordState, keyFifths = 0) {
     const div = document.getElementById(divId);
     div.innerHTML = "";
     const renderer = new Renderer(div, Renderer.Backends.SVG);
     renderer.resize(740, 320);
     const context = renderer.getContext();
-    
-    const topStave = new Stave(100, 50, 500).addClef("treble", "default", "8vb").setContext(context).draw();
-    const botStave = new Stave(100, 180, 500).addClef("bass").setContext(context).draw();
+
+    // keyFifths=0 (the default -- no key context, e.g. the standalone Chord page) draws no key
+    // signature at all, matching this function's exact prior behavior (plan.md §33).
+    const keySpec = keyFifths ? KEY_SPEC_BY_FIFTHS[String(keyFifths)] : null;
+    // Which letter-steps the key signature glyph just drawn already alters (plan.md §44 item 2)
+    // -- makeNote() below uses this so a note whose alteration already matches the key signature
+    // (e.g. F# in a 1-sharp key) draws no redundant accidental of its own, while one that needs to
+    // *differ from* the key signature (an F natural in that same key) still gets an explicit
+    // accidental to cancel it. keyFifths=0 gives every step 0, so this is a no-op then.
+    const keyAlterations = keySignatureAlterations(keyFifths);
+    let topStave = new Stave(100, 50, 500).addClef("treble", "default", "8vb");
+    let botStave = new Stave(100, 180, 500).addClef("bass");
+    if (keySpec) {
+        topStave = topStave.addKeySignature(keySpec);
+        botStave = botStave.addKeySignature(keySpec);
+    }
+    topStave = topStave.setContext(context).draw();
+    botStave = botStave.setContext(context).draw();
     new StaveConnector(topStave, botStave).setType(StaveConnector.type.BRACE).setContext(context).draw();
 
     const makeNote = (noteObj, stem, clef, forceNatural, isUnison, xShift = 0) => {
@@ -26,10 +49,17 @@ export function drawChord(divId, chordState) {
         let o = (clef === 'treble') ? noteObj.oct + 1 : noteObj.oct;
         const vn = new StaveNote({ keys: [`${noteObj.step}/${o}`], duration: "q", stem_direction: stem, clef: clef });
 
+        // Key-signature-aware accidental (plan.md §44 item 2): only draw one when this note's
+        // alteration actually differs from what the key signature already provides for this
+        // letter -- an F# in a 1-sharp key needs nothing (the key sig glyph already says so),
+        // while an F-natural in that same key still needs an explicit natural to cancel it.
+        // keyAlterations is all-zero when keyFifths=0, so this reduces to the old "!== 0" check
+        // exactly for the no-key-context case (the standalone Chord page's own prior behavior).
+        const keyAlt = keyAlterations[noteObj.step] || 0;
         let accStr = null;
-        if (noteObj.acc !== 0 && !isUnison) {
-            accStr = ACC_TO_STR[noteObj.acc].replace('x', '##');
-        } else if (noteObj.acc === 0 && forceNatural) {
+        if (!isUnison && noteObj.acc !== keyAlt) {
+            accStr = noteObj.acc === 0 ? "n" : ACC_TO_STR[noteObj.acc].replace('x', '##');
+        } else if (noteObj.acc === keyAlt && forceNatural) {
             accStr = "n";
         }
 

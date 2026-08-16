@@ -5,9 +5,9 @@
    "preview without committing" state anymore. */
 import { STR_TO_ACC, ACC_TO_STR, getAbsSemitone } from './spelling.js';
 import { writeScoreDocument, readScoreDocument, newChordId, SCORE_STORAGE_KEY } from './score-store.js';
-import { VOWEL_PRESETS_EAR, getNoteString } from './state.js';
+import { VOWEL_PRESETS_EAR, getNoteString, AUDIO_DEFAULTS } from './state.js';
 import { createDocumentStore } from './document-store.js';
-import { analyzeChord, CHORD_PATTERNS, getPCName, keyFifthsAtBeat } from './theory.js';
+import { analyzeChord, CHORD_PATTERNS, getKeyAwarePCName, getKeyName, getRomanNumeral, keyFifthsAtBeat, keyModeAtBeat, parseRomanNumeral, chordPitchClasses, checkPillarConsistency } from './theory.js';
 import { playScore, stopScorePlayback, saveScoreAsWav, primeAudioContext } from './audio.js';
 import { parseChordName, generateVoicings } from './voicing-generator.js';
 import { swapVoices, bumpOctave, SWAP_PAIRS, VOICE_LABELS } from './revoice.js';
@@ -19,17 +19,13 @@ import { drawChord } from './notation.js';
 // the user is still choosing a file / looking over the loaded score, well before they click Play.
 window.addEventListener('pointerdown', primeAudioContext, { once: true, capture: true });
 
-// Fixed vibrato/formant-Q defaults, matching state.js's appState.settings.audio -- the Chord
-// page's own knobs for these -- since /score has no equivalent UI (plan.md §10.5 only asked for
-// tempo + the 4-part mix + mute, not a full audio-settings panel here too). vps/volume match the
-// Chord page's own hardcoded defaults for the same reason.
-const SCORE_AUDIO_DEFAULTS = {
-    vibratoJitterCutoff: 100, vibratoJitterAmount: 2.5,
-    phaseJitter: 0.08, vibratoDepth: 0.002,
-    vibratoRateMean: 5.2, vibratoRateRange: 1.2,
-    q1: 10, q2: 15,
-    vps: 2, volume: 0.05,
-};
+// Fixed vibrato/formant-Q/vps/volume defaults for whole-score playback -- /score has no
+// equivalent UI for these (plan.md §10.5 only asked for tempo + the 4-part mix + mute, not a full
+// audio-settings panel here too), so it needs a stable, independent snapshot rather than reading
+// live appState.settings from the Chord page (which could reflect a one-off customization made
+// there). Derived from state.js's own AUDIO_DEFAULTS (plan.md §37) instead of a hand-copied
+// literal, so there's one place left to edit when a default changes.
+const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps, volume: AUDIO_DEFAULTS.volume };
 
 (function () {
     const engine = window["barbershop-engine"];
@@ -40,6 +36,9 @@ const SCORE_AUDIO_DEFAULTS = {
     const retuneBtn = document.getElementById('retuneBtn');
     const retuneIntonationEl = document.getElementById('retuneIntonation');
     const retuneRootlessEl = document.getElementById('retuneRootless');
+    // Page-local display preference (plan.md §34) -- not persisted to score:current, same
+    // treatment as the playback mixer's "for listening only, not saved with the score" sliders.
+    const showRomanNumeralsEl = document.getElementById('showRomanNumerals');
     const scoreBpmEl = document.getElementById('scoreBpm');
     const playScoreBtn = document.getElementById('playScoreBtn');
     const stopScoreBtn = document.getElementById('stopScoreBtn');
@@ -206,7 +205,7 @@ const SCORE_AUDIO_DEFAULTS = {
         with it. "custom" has no table entry, so its numbers *are* carried through and used as-is.
         A file with no vowel data at all (not a re-import of this app's own export) falls back to
         this screen's existing default. */
-    function toStateChord(c) {
+    function toStateChord(c, keyFifths = 0, mode = 'major') {
         const vowelKey = c.vowelKey || 'a';
         const isCustom = vowelKey === 'custom';
         const preset = !isCustom && VOWEL_PRESETS_EAR[vowelKey];
@@ -225,6 +224,10 @@ const SCORE_AUDIO_DEFAULTS = {
             tuning: VOICE_ORDER.map(({ part }) => c[CENTS_FIELD[part]] || 0),
             vowel: preset || isCustom ? vowelKey : 'a',
             formants,
+            // Raw Roman-numeral text of a newly-designated pillar chord at this position (plan.md
+            // §40.3), or null -- re-parsed against the locally active key wherever it's needed,
+            // never pre-resolved here.
+            pillarChord: c.pillarChord || null,
             volumePerPart: [1, 1, 1, 1],
             // Computed once at import (plan.md §10.9), not left null -- render() needs a name
             // source that stays correctly *positioned* even after a chord's inserted/removed
@@ -234,7 +237,7 @@ const SCORE_AUDIO_DEFAULTS = {
             // stale after a *live* edit to this same chord's own notes, same as before (a real
             // analysis pass only runs at import/insert/replace time, not on every edit) --
             // unchanged, deliberate limitation, not something this fixes or was meant to.
-            analysis: analyzeChord(voices.map(v => voiceDisplayString(v)), { tuning_style: 'just' }),
+            analysis: analyzeChord(voices.map(v => voiceDisplayString(v)), { tuning_style: 'just', keyFifths, mode }),
         };
     }
 
@@ -278,9 +281,11 @@ const SCORE_AUDIO_DEFAULTS = {
         if (!currentDoc) return;
         const result = currentResult;
         const meta = currentDoc.metadata;
-        const keyChangeSuffix = meta.keyChanges && meta.keyChanges.length > 1
-            ? ` (+${meta.keyChanges.length - 1} change${meta.keyChanges.length > 2 ? 's' : ''})` : '';
-        summaryEl.textContent = `Key: ${meta.keyFifths} fifths${keyChangeSuffix}  |  Time: ${meta.timeBeats}/${meta.timeBeatType}  |  ${currentDoc.chords.length} chords`;
+        // A real key name (plan.md §46), not the raw "N fifths" this used to read -- the
+        // per-key-change callout rows below now make every change visible in place, so the old
+        // "(+N change(s))" suffix (a bare count with no location) is redundant/dropped.
+        const beat0Mode = meta.keyChanges?.[0]?.mode || 'major';
+        summaryEl.textContent = `Key: ${getKeyName(meta.keyFifths, beat0Mode)}  |  Time: ${meta.timeBeats}/${meta.timeBeatType}  |  ${currentDoc.chords.length} chords`;
 
         const warnings = result ? result.warnings : [];
         warningsEl.innerHTML = warnings.length
@@ -298,10 +303,31 @@ const SCORE_AUDIO_DEFAULTS = {
         const EPS = 1e-6;
         let boundaryIdx = 0;
         let pos = 0;
+        // The *active* pillar chord for each row (plan.md §40.3) -- "stays in effect until a new
+        // one is designated" resolves for free with a single running variable, since rows are
+        // walked in document order: each chord's own declaration (if any) overwrites it before
+        // that row is rendered, so every row after sees the nearest preceding declaration.
+        let activePillarText = null;
+        // Key callout rows (plan.md §46): "before the first measure and at every key change" --
+        // a second walking cursor, parallel to boundaryIdx's own measure-divider walk, checked
+        // *first* each iteration so beat 0's reading order is "Key: ..." then "Measure 1" then the
+        // first chord row.
+        let keyChangeIdx = 0;
         const rows = [];
         currentDoc.chords.forEach((docChord, i) => {
+            while (keyChangeIdx < meta.keyChanges.length && pos >= meta.keyChanges[keyChangeIdx].atBeat - EPS) {
+                const kc = meta.keyChanges[keyChangeIdx];
+                const kcMode = kc.mode || 'major';
+                const otherMode = kcMode === 'minor' ? 'major' : 'minor';
+                rows.push(`<tr class="key-callout-row"><td colspan="10">Key: ${escapeHtml(getKeyName(kc.keyFifths, kcMode))}
+                    <button class="row-action-btn mode-toggle-btn" data-key-change-idx="${keyChangeIdx}"
+                        title="Switch this key segment to its relative ${otherMode} -- relabels every affected chord's Roman numeral">
+                        Switch to ${escapeHtml(getKeyName(kc.keyFifths, otherMode))}
+                    </button></td></tr>`);
+                keyChangeIdx++;
+            }
             while (boundaryIdx < boundaries.length - 1 && pos >= boundaries[boundaryIdx] - EPS) {
-                rows.push(`<tr class="measure-row"><td colspan="9">Measure ${boundaryIdx + 1}</td></tr>`);
+                rows.push(`<tr class="measure-row"><td colspan="10">Measure ${boundaryIdx + 1}</td></tr>`);
                 boundaryIdx++;
             }
             const tenor = appendCents(voiceDisplayString(docChord.voices[3]), docChord.tuning[3]);
@@ -312,18 +338,50 @@ const SCORE_AUDIO_DEFAULTS = {
             const beats = docChord.beats;
             // docChord.analysis (computed once at import/insert/replace time, see toStateChord's
             // own comment) is the name source -- stays correctly positioned across a splice,
-            // unlike a position-based lookup into a separate array would.
-            const name = docChord.analysis ? docChord.analysis.common_name : '?';
+            // unlike a position-based lookup into a separate array would. Roman-numeral display
+            // (plan.md §34) falls back to the letter name for a chord quality with no Roman-
+            // numeral convention in this app's vocabulary (roman_numeral is null in that case).
+            const showRoman = showRomanNumeralsEl.checked;
+            const name = docChord.analysis
+                ? (showRoman ? (docChord.analysis.roman_numeral || docChord.analysis.common_name) : docChord.analysis.common_name)
+                : '?';
             const editLink = `<a href="../?sid=${encodeURIComponent(docChord.id)}" target="_blank">Edit</a>`;
             // Click-to-edit picker (plan.md §10.2's item 7): a lighter way to change just the
             // vowel without opening the full Chord editor.
             const vowelTd = `<td class="vowel-col vowel-editable" data-idx="${i}" title="Click to change vowel">${escapeHtml(vowel)}</td>`;
+
+            // Pillar-chord designation + consistency indicator (plan.md §40.3, mode-aware §46).
+            if (docChord.pillarChord) activePillarText = docChord.pillarChord;
+            const rowKeyFifths = keyFifthsAtBeat(meta.keyChanges, pos);
+            const rowMode = keyModeAtBeat(meta.keyChanges, pos);
+            const resolvedPillar = activePillarText ? parseRomanNumeral(activePillarText, rowKeyFifths, rowMode) : null;
+            let badge = '';
+            let voiceItBtn = '';
+            if (activePillarText && !resolvedPillar) {
+                badge = `<span class="pillar-badge unparseable" title="&quot;${escapeHtml(activePillarText)}&quot; isn't a recognized Roman numeral">?</span>`;
+            } else if (resolvedPillar) {
+                const pillarPcs = chordPitchClasses(resolvedPillar.pattern, resolvedPillar.rootPc);
+                const verdict = checkPillarConsistency(docChord.voices, pillarPcs);
+                if (verdict === 'consistent') {
+                    badge = `<span class="pillar-badge consistent" title="Consistent with the active pillar chord (${escapeHtml(activePillarText)})">✓</span>`;
+                    voiceItBtn = `<button class="row-action-btn" data-voice-it-idx="${i}" data-voice-it-pattern="${resolvedPillar.pattern}" data-voice-it-root="${resolvedPillar.rootPc}" title="Search voicings of the active pillar chord (${escapeHtml(activePillarText)}) keeping this chord's own notes fixed">🎯 Voice it</button>`;
+                } else if (verdict === 'inconsistent') {
+                    badge = `<span class="pillar-badge inconsistent" title="Not a chord tone of the active pillar chord (${escapeHtml(activePillarText)})">⚠</span>`;
+                }
+                // 'undetermined' (nothing entered yet) shows no badge at all -- nothing to flag.
+            }
+            const pillarTd = `<td class="pillar-col"><input type="text" class="pillar-input" data-idx="${i}"
+                value="${escapeHtml(docChord.pillarChord || '')}" placeholder="${activePillarText ? escapeHtml(activePillarText) : '—'}"
+                title="Declare this chord as a new pillar (e.g. &quot;ii7&quot;) -- blank inherits from before">${badge}</td>`;
+
             // Insert-before/Replace (plan.md §10.9's chord picker).
             const rowActions = `${editLink}
                 <button class="row-action-btn" data-picker-mode="insert" data-picker-idx="${i}" title="Insert a new chord before this one">⊕ Insert</button>
-                <button class="row-action-btn" data-picker-mode="replace" data-picker-idx="${i}" title="Replace this chord">↻ Replace</button>`;
+                <button class="row-action-btn" data-picker-mode="replace" data-picker-idx="${i}" title="Replace this chord">↻ Replace</button>
+                ${voiceItBtn}`;
             rows.push(`<tr>
                 <td>${i}</td><td>${beats}</td><td>${escapeHtml(name)}</td>
+                ${pillarTd}
                 ${vowelTd}
                 <td class="cents-note">${escapeHtml(tenor)}</td><td class="cents-note">${escapeHtml(lead)}</td>
                 <td class="cents-note">${escapeHtml(bari)}</td><td class="cents-note">${escapeHtml(bass)}</td>
@@ -492,10 +550,25 @@ const SCORE_AUDIO_DEFAULTS = {
         // actually active at this chord's position -- mid-piece key changes are now tracked
         // (plan.md §26), so this is the real local key, not just the score's beat-0 one.
         opts.keyFifths = keyFifthsAtBeat(currentDoc.metadata.keyChanges, chordStartBeat(pickerTarget.index));
-        renderPickerResults(generateVoicings(opts));
+        // Mode only matters for how a result is *labeled* (Roman numeral, plan.md §46) --
+        // generateVoicings()/its ranking is entirely mode-independent (see theory.js's own
+        // getKeyDiatonicPitchClasses doc comment: natural minor shares its relative major's exact
+        // pitch classes), so this is threaded straight to renderPickerResults, not into opts.
+        const mode = keyModeAtBeat(currentDoc.metadata.keyChanges, chordStartBeat(pickerTarget.index));
+        renderPickerResults(generateVoicings(opts), opts.keyFifths, mode);
     }
 
-    function renderPickerResults(results) {
+    // Cached so the picker can re-render its already-fetched results when the Roman-numeral
+    // toggle is flipped while the dialog is still open (plan.md §44 item 1), without re-running
+    // the search itself.
+    let lastPickerResults = [];
+    let lastPickerKeyFifths = 0;
+    let lastPickerMode = 'major';
+
+    function renderPickerResults(results, keyFifths = 0, mode = 'major') {
+        lastPickerResults = results;
+        lastPickerKeyFifths = keyFifths;
+        lastPickerMode = mode;
         if (!results.length) {
             showPickerStatus('No matching chords found.', false);
             pickerResultsEl.innerHTML = '';
@@ -509,9 +582,15 @@ const SCORE_AUDIO_DEFAULTS = {
             false
         );
 
+        // Roman-numeral display (plan.md §44 item 1): §34 wired the toggle into the main chord
+        // table's render() but never into this separate rendering path, so the picker always
+        // showed the letter name regardless of the toggle. Same fallback-to-letter-name policy as
+        // render() itself for a quality with no Roman-numeral convention in this app's vocabulary.
+        const showRoman = showRomanNumeralsEl.checked;
         pickerResultsEl.innerHTML = shown.map(r => {
             const qualityName = (CHORD_PATTERNS[r.pattern] && CHORD_PATTERNS[r.pattern].name) || r.pattern;
-            const label = `${getPCName(r.rootPc)} ${qualityName}`;
+            const romanNumeral = showRoman ? getRomanNumeral(r.rootPc, r.pattern, keyFifths, mode) : null;
+            const label = romanNumeral || `${getKeyAwarePCName(r.rootPc, keyFifths)} ${qualityName}`;
             // r.voices is Bass/Bari/Lead/Tenor (index 0-3, matching VOICE_ORDER) -- displayed
             // Tenor-first to match the score table's own column order.
             const notesDisplay = [3, 2, 1, 0].map(i => voiceDisplayString(r.voices[i])).join(' / ');
@@ -548,9 +627,13 @@ const SCORE_AUDIO_DEFAULTS = {
     // re-derives it fresh via analyzeChord(), see its own comment), so unlike main.js's version
     // this one only ever stages voices, never cents.
     let revoiceVoices = null;
+    // The picker candidate's own resolved local key (plan.md §33), staged alongside
+    // revoiceVoices -- resolved once when the dialog opens, same value runPickerSearch() already
+    // used to rank the candidate being revoiced.
+    let revoiceKeyFifths = 0;
 
     function renderScoreRevoiceDialog() {
-        drawChord('revoiceNotation', revoiceVoices);
+        drawChord('revoiceNotation', revoiceVoices, revoiceKeyFifths);
 
         const swapsEl = document.getElementById('revoiceSwaps');
         swapsEl.innerHTML = SWAP_PAIRS.map(([a, b], i) =>
@@ -577,7 +660,7 @@ const SCORE_AUDIO_DEFAULTS = {
             btn.onclick = () => {
                 const idx = parseInt(btn.dataset.octIdx, 10);
                 const dir = parseInt(btn.dataset.octDir, 10);
-                revoiceVoices = bumpOctave(revoiceVoices, idx, dir);
+                revoiceVoices = bumpOctave(revoiceVoices, idx, dir, revoiceKeyFifths);
                 renderScoreRevoiceDialog();
             };
         });
@@ -585,6 +668,9 @@ const SCORE_AUDIO_DEFAULTS = {
 
     function openScoreRevoiceDialog(candidate) {
         revoiceVoices = candidate.voices.map(v => Object.assign({}, v));
+        revoiceKeyFifths = pickerTarget
+            ? keyFifthsAtBeat(currentDoc.metadata.keyChanges, chordStartBeat(pickerTarget.index))
+            : 0;
         renderScoreRevoiceDialog();
         scoreRevoiceOverlay.style.display = 'flex';
     }
@@ -634,7 +720,12 @@ const SCORE_AUDIO_DEFAULTS = {
         // VOICE_ORDER/analyzeChord's positional part-labeling expects -- see VOICE_ORDER's own
         // comment and retuneBtn's identical noteStrs construction.
         const noteStrs = VOICE_ORDER.map((_, i) => voiceDisplayString(candidate.voices[i]));
-        const analysis = analyzeChord(noteStrs, { tuning_style: 'just' });
+        // Same key resolution runPickerSearch() already used to rank these results (plan.md
+        // §15/§26/§46) -- recomputed here rather than threaded through candidate, since
+        // pickerTarget is still valid at commit time and this is cheap.
+        const keyFifths = keyFifthsAtBeat(currentDoc.metadata.keyChanges, chordStartBeat(pickerTarget.index));
+        const mode = keyModeAtBeat(currentDoc.metadata.keyChanges, chordStartBeat(pickerTarget.index));
+        const analysis = analyzeChord(noteStrs, { tuning_style: 'just', keyFifths, mode });
         // Every template round-trips through analyzeChord() at every root (js-tests.html group
         // 20) -- this fallback exists so a future template that doesn't would degrade to equal
         // temperament rather than crash, not because it's expected to trigger.
@@ -653,6 +744,11 @@ const SCORE_AUDIO_DEFAULTS = {
             // afterward same as any imported chord.
             vowel: 'a',
             formants: { f1: 730, f2: 1090, f3: 2440 },
+            // Replace keeps the slot's own pillar designation (a property of the slot, not the
+            // particular voicing picked for it, plan.md §40.3); Insert/Append have no prior slot
+            // to inherit from, so they start with none, same as any other new chord.
+            pillarChord: pickerTarget.mode === 'replace'
+                ? (currentDoc.chords[pickerTarget.index].pillarChord || null) : null,
             volumePerPart: [1, 1, 1, 1],
             analysis,
         };
@@ -676,6 +772,15 @@ const SCORE_AUDIO_DEFAULTS = {
         closeChordPicker();
     }
 
+    // Roman-numeral display toggle (plan.md §34) -- purely re-renders with the already-computed
+    // roman_numeral field, no re-analysis needed. Also re-renders the chord-picker dialog's
+    // already-fetched results if it's open (plan.md §44 item 1) -- renderPickerResults() reads
+    // the checkbox itself, so replaying the cached results/keyFifths is enough.
+    showRomanNumeralsEl.onchange = () => {
+        render();
+        if (chordPickerOverlay.style.display !== 'none') renderPickerResults(lastPickerResults, lastPickerKeyFifths, lastPickerMode);
+    };
+
     appendChordBtn.onclick = () => openChordPicker('append', currentDoc ? currentDoc.chords.length : 0);
     pickerCloseBtn.onclick = () => closeChordPicker();
     pickerSearchBtn.onclick = () => runPickerSearch();
@@ -688,6 +793,92 @@ const SCORE_AUDIO_DEFAULTS = {
         const btn = e.target.closest('button[data-picker-mode]');
         if (!btn || !currentDoc) return;
         openChordPicker(btn.dataset.pickerMode, parseInt(btn.dataset.pickerIdx, 10));
+    });
+
+    // Pillar-chord declaration (plan.md §40.3): plain always-editable text input, not a
+    // click-to-reveal control like the vowel cell -- free text (a Roman numeral), not a choice
+    // from a fixed list, so there's nothing to "reveal" a picker for. Commits on blur/Enter;
+    // blank means "no new pillar here, inherit from before" (matches the placeholder, which
+    // always shows whichever pillar is currently active up to this row).
+    function commitPillarInput(input) {
+        if (!currentDoc) return;
+        const idx = parseInt(input.dataset.idx, 10);
+        const chord = currentDoc.chords[idx];
+        if (Number.isNaN(idx) || !chord) return;
+        const value = input.value.trim() || null;
+        if (value === (chord.pillarChord || null)) return; // no real change, skip a no-op undo entry
+        pushDocUndo();
+        chord.pillarChord = value;
+        currentDoc.updatedAt = Date.now();
+        writeScoreDocument(currentDoc);
+        updateDocStrip();
+        updateUndoRedoButtons();
+        setStatus(value ? `Chord ${idx}: pillar chord set to "${value}".` : `Chord ${idx}: pillar declaration cleared.`);
+        render();
+    }
+    chordsEl.addEventListener('change', (e) => {
+        const input = e.target.closest('input.pillar-input');
+        if (input) commitPillarInput(input);
+    });
+    chordsEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && e.target.closest('input.pillar-input')) e.target.blur();
+    });
+
+    // "Voice it" (plan.md §40.3): opens the same chord picker Insert/Replace already use, prefilled
+    // exactly like Replace (existing non-resting voices locked as fixed), but searches the pillar's
+    // own exact quality+root directly via generateVoicings() instead of round-tripping through
+    // pickerNameInput's chord-name text parser -- more precise, and the pattern/root are already
+    // known from the badge's own consistency check moments ago.
+    chordsEl.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-voice-it-idx]');
+        if (!btn || !currentDoc) return;
+        const idx = parseInt(btn.dataset.voiceItIdx, 10);
+        const pattern = btn.dataset.voiceItPattern;
+        const rootPc = parseInt(btn.dataset.voiceItRoot, 10);
+        openChordPicker('replace', idx);
+        const fixed = [];
+        [0, 1, 2, 3].forEach(v => {
+            const parsed = parseFixInput(document.getElementById(`pickerFix-${v}`).value);
+            if (parsed) fixed.push({ voice: v, semi: getAbsSemitone(parsed) });
+        });
+        const keyFifths = keyFifthsAtBeat(currentDoc.metadata.keyChanges, chordStartBeat(idx));
+        const mode = keyModeAtBeat(currentDoc.metadata.keyChanges, chordStartBeat(idx));
+        renderPickerResults(generateVoicings({ pattern, rootPc, fixed, keyFifths }), keyFifths, mode);
+    });
+
+    // Mode-toggle button on a key callout row (plan.md §46): switches that key segment between
+    // major and its relative minor. Important gotcha this handler exists specifically to avoid --
+    // docChord.analysis (carrying .roman_numeral) is cached at chord-creation time, not recomputed
+    // live in render() (see toStateChord's own comment); a naive "just flip kc.mode and render()"
+    // handler would leave every affected row's Roman numeral stale, silently defeating the whole
+    // point of the button. So this walks every chord and recomputes .analysis fresh, mirroring
+    // retuneBtn's own "walk every chord, recompute one derived field, leave everything else alone"
+    // pattern rather than a new segment-scoped partial recompute.
+    function commitModeToggle(keyChangeIdx) {
+        if (!currentDoc) return;
+        const kc = currentDoc.metadata.keyChanges[keyChangeIdx];
+        if (!kc) return;
+        const newMode = (kc.mode || 'major') === 'minor' ? 'major' : 'minor';
+        pushDocUndo();
+        kc.mode = newMode;
+        let pos = 0;
+        currentDoc.chords.forEach(chord => {
+            const kf = keyFifthsAtBeat(currentDoc.metadata.keyChanges, pos);
+            const md = keyModeAtBeat(currentDoc.metadata.keyChanges, pos);
+            const noteStrs = chord.voices.map(v => voiceDisplayString(v));
+            chord.analysis = analyzeChord(noteStrs, { tuning_style: 'just', keyFifths: kf, mode: md });
+            pos += chord.beats;
+        });
+        currentDoc.updatedAt = Date.now();
+        writeScoreDocument(currentDoc);
+        updateDocStrip();
+        updateUndoRedoButtons();
+        setStatus(`Key at beat ${kc.atBeat}: switched to ${getKeyName(kc.keyFifths, newMode)}.`);
+        render();
+    }
+    chordsEl.addEventListener('click', (e) => {
+        const btn = e.target.closest('button.mode-toggle-btn');
+        if (btn && currentDoc) commitModeToggle(parseInt(btn.dataset.keyChangeIdx, 10));
     });
 
     // Choosing a file both imports it and immediately commits it as the shared score:current
@@ -716,15 +907,30 @@ const SCORE_AUDIO_DEFAULTS = {
         try {
             currentXml = await file.text();
             currentResult = WebApi.importSummary(currentXml);
+            // Parallel arrays (plan.md §26, mode added §46) zipped into the {atBeat, keyFifths,
+            // mode} shape used everywhere else in this file and in theory.js's keyFifthsAtBeat()/
+            // keyModeAtBeat() -- computed here, ahead of currentDoc itself (rather than read off
+            // currentDoc.metadata), since the chords map right below needs it and currentDoc
+            // doesn't exist yet at this point.
+            const keyChanges = Array.from(currentResult.keyChangeBeats).map((atBeat, i) => (
+                { atBeat, keyFifths: currentResult.keyChangeFifths[i], mode: currentResult.keyChangeModes[i] || 'major' }
+            ));
+            // Resolves each chord's own local key as it's imported (plan.md §15, so a chord
+            // after a mid-piece key change gets spelled correctly too) -- a running beat
+            // accumulator, mirroring the chord picker's own chordStartBeat()/keyFifthsAtBeat()
+            // pattern, just inlined here since there's no currentDoc.chords array yet to sum over.
+            let importBeatPos = 0;
+            const chords = currentResult.chords.map(c => {
+                const keyFifths = keyFifthsAtBeat(keyChanges, importBeatPos);
+                const mode = keyModeAtBeat(keyChanges, importBeatPos);
+                importBeatPos += c.beats;
+                return toStateChord(c, keyFifths, mode);
+            });
             currentDoc = {
-                chords: currentResult.chords.map(toStateChord),
+                chords,
                 metadata: {
                     keyFifths: currentResult.keyFifths,
-                    // Parallel arrays (plan.md §26) zipped into the {atBeat, keyFifths} shape
-                    // used everywhere else in this file and in theory.js's keyFifthsAtBeat().
-                    keyChanges: Array.from(currentResult.keyChangeBeats).map((atBeat, i) => (
-                        { atBeat, keyFifths: currentResult.keyChangeFifths[i] }
-                    )),
+                    keyChanges,
                     timeBeats: currentResult.timeBeats,
                     timeBeatType: currentResult.timeBeatType,
                     measureBoundariesBeats: Array.from(currentResult.measureBoundariesBeats),
@@ -789,7 +995,8 @@ const SCORE_AUDIO_DEFAULTS = {
         const vowel = chord.vowel || null;
         const formants = chord.formants || {};
         return new engine.barbershop.web.JsEditedChord(
-            chord.beats, voices, vowel, formants.f1 || 0, formants.f2 || 0, formants.f3 || 0
+            chord.beats, voices, vowel, formants.f1 || 0, formants.f2 || 0, formants.f3 || 0,
+            chord.pillarChord || null
         );
     }
 
@@ -802,6 +1009,7 @@ const SCORE_AUDIO_DEFAULTS = {
                 jsChords, meta.keyFifths,
                 Float64Array.from(meta.keyChanges.map(k => k.atBeat)),
                 Int32Array.from(meta.keyChanges.map(k => k.keyFifths)),
+                meta.keyChanges.map(k => k.mode || 'major'), // plain JS array -- Array<String> needs no typed-array wrapper
                 meta.timeBeats, meta.timeBeatType,
                 Float64Array.from(meta.measureBoundariesBeats)
             );
@@ -972,7 +1180,7 @@ const SCORE_AUDIO_DEFAULTS = {
         currentResult = null;
         currentDoc = {
             chords: [],
-            metadata: { keyFifths: 0, keyChanges: [{ atBeat: 0, keyFifths: 0 }], timeBeats, timeBeatType, measureBoundariesBeats: [0, timeBeats * 4 / timeBeatType] },
+            metadata: { keyFifths: 0, keyChanges: [{ atBeat: 0, keyFifths: 0, mode: 'major' }], timeBeats, timeBeatType, measureBoundariesBeats: [0, timeBeats * 4 / timeBeatType] },
             sourceXml: null,
             updatedAt: Date.now(),
         };
@@ -1010,9 +1218,11 @@ const SCORE_AUDIO_DEFAULTS = {
         try {
             // A document persisted before plan.md §26 has no metadata.keyChanges at all --
             // backfill a single beat-0 entry so the picker's per-position key lookup doesn't
-            // choke on stale localStorage from an earlier session.
+            // choke on stale localStorage from an earlier session. A document that already has
+            // keyChanges but predates §46's mode field needs no such backfill -- keyModeAtBeat()'s
+            // own `|| 'major'` fallback already covers a missing .mode on any individual entry.
             if (doc.metadata && !doc.metadata.keyChanges) {
-                doc.metadata.keyChanges = [{ atBeat: 0, keyFifths: doc.metadata.keyFifths || 0 }];
+                doc.metadata.keyChanges = [{ atBeat: 0, keyFifths: doc.metadata.keyFifths || 0, mode: 'major' }];
             }
             currentXml = doc.sourceXml || null;
             currentResult = currentXml ? WebApi.importSummary(currentXml) : null;
