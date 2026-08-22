@@ -9,7 +9,7 @@ import { VOWEL_PRESETS_EAR, getNoteString, AUDIO_DEFAULTS } from './state.js';
 import { createDocumentStore } from './document-store.js';
 import { analyzeChord, CHORD_PATTERNS, getKeyAwarePCName, getKeyName, getRomanNumeral, keyFifthsAtBeat, keyModeAtBeat, parseRomanNumeral, chordPitchClasses, checkPillarConsistency } from './theory.js';
 import { playScore, stopScorePlayback, saveScoreAsWav, primeAudioContext } from './audio.js';
-import { parseChordName, generateVoicings } from './voicing-generator.js';
+import { parseChordName, generateVoicings, groupResultsByChord } from './voicing-generator.js';
 import { swapVoices, bumpOctave, SWAP_PAIRS, VOICE_LABELS } from './revoice.js';
 import { drawChord } from './notation.js';
 
@@ -455,7 +455,11 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
     // pushDocUndo()/writeScoreDocument() path bulk re-tune and the vowel picker already use, so
     // undo/redo covers it for free, no cross-tab sync to design.
     let pickerTarget = null; // { mode: 'insert' | 'replace' | 'append', index }
-    const PICKER_RESULT_CAP = 60;
+    const PICKER_RESULT_CAP = 60; // now caps distinct chords (plan.md §49), not individual voicings
+    // "A few highly probable choices" per Mike's own framing (plan.md §49) -- a named, tunable
+    // first-guess constant, same spirit as voicing-generator.js's own CHROMATIC_PENALTY_PER_NOTE
+    // etc. Anything beyond this shortlist is reached via 🔀 Revoice instead of being listed.
+    const PICKER_SUBRESULT_CAP = 5;
     const FIX_NOTE_PATTERN = /^([a-gA-G])(bb|b|#|x)?([0-8])$/;
 
     function parseFixInput(text) {
@@ -496,6 +500,7 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
         });
         showPickerStatus('', false);
         pickerResultsEl.innerHTML = '';
+        expandedGroupKeys.clear();
         chordPickerOverlay.style.display = 'flex';
         pickerNameInput.focus();
     }
@@ -511,19 +516,45 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
     }
 
     function runPickerSearch() {
+        expandedGroupKeys.clear(); // a genuinely new search -- start every chord group collapsed
+
+        // Resolved up front (not just before the final search call) because Roman-numeral parsing
+        // below needs it too -- both the name field's own parsing and generateVoicings()'s ranking
+        // read the key signature actually active at this chord's position; mid-piece key changes
+        // are tracked (plan.md §26), so this is the real local key, not just the score's beat-0
+        // one. Mode only matters for *labeling* (Roman numeral, plan.md §46) --
+        // generateVoicings()/its ranking is entirely mode-independent (see theory.js's own
+        // getKeyDiatonicPitchClasses doc comment: natural minor shares its relative major's exact
+        // pitch classes) -- except for resolving the name field itself when it's a Roman numeral,
+        // where mode changes which scale degree a numeral like "i" even means.
+        const keyFifths = keyFifthsAtBeat(currentDoc.metadata.keyChanges, chordStartBeat(pickerTarget.index));
+        const mode = keyModeAtBeat(currentDoc.metadata.keyChanges, chordStartBeat(pickerTarget.index));
+
         const nameText = pickerNameInput.value.trim();
         const opts = {};
 
         if (nameText) {
             const parsed = parseChordName(nameText);
-            if (!parsed) {
-                showPickerStatus(`"${nameText}" isn't a recognized chord name (try e.g. Cm7, F#7, Bbmaj7).`, true);
-                pickerResultsEl.innerHTML = '';
-                return;
+            if (parsed) {
+                opts.pattern = parsed.pattern;
+                const rootSemi = getAbsSemitone({ step: parsed.rootStep, acc: parsed.rootAcc, oct: 0 });
+                opts.rootPc = ((rootSemi % 12) + 12) % 12;
+            } else {
+                // Not a letter-name chord -- try it as a Roman numeral against this chord's own
+                // local key (plan.md §49.1, Mike's own ask: "the fixed-note search should work
+                // with Roman numerals too"). No ambiguity between the two: every valid Roman
+                // numeral starts with I/V (or a b/# accidental prefix), none of which is a real
+                // note letter (A-G), so a string can never parse as both. parseRomanNumeral()
+                // resolves straight to { pattern, rootPc }, no note-letter round trip needed.
+                const romanParsed = parseRomanNumeral(nameText, keyFifths, mode);
+                if (!romanParsed) {
+                    showPickerStatus(`"${nameText}" isn't a recognized chord name or Roman numeral (try e.g. Cm7, F#7, Bbmaj7, ii7, V7).`, true);
+                    pickerResultsEl.innerHTML = '';
+                    return;
+                }
+                opts.pattern = romanParsed.pattern;
+                opts.rootPc = romanParsed.rootPc;
             }
-            opts.pattern = parsed.pattern;
-            const rootSemi = getAbsSemitone({ step: parsed.rootStep, acc: parsed.rootAcc, oct: 0 });
-            opts.rootPc = ((rootSemi % 12) + 12) % 12;
         }
 
         const fixed = [];
@@ -546,16 +577,8 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
             return;
         }
 
-        // Ranks results by barbershoppiness + in-key-ness (plan.md §23) against the key signature
-        // actually active at this chord's position -- mid-piece key changes are now tracked
-        // (plan.md §26), so this is the real local key, not just the score's beat-0 one.
-        opts.keyFifths = keyFifthsAtBeat(currentDoc.metadata.keyChanges, chordStartBeat(pickerTarget.index));
-        // Mode only matters for how a result is *labeled* (Roman numeral, plan.md §46) --
-        // generateVoicings()/its ranking is entirely mode-independent (see theory.js's own
-        // getKeyDiatonicPitchClasses doc comment: natural minor shares its relative major's exact
-        // pitch classes), so this is threaded straight to renderPickerResults, not into opts.
-        const mode = keyModeAtBeat(currentDoc.metadata.keyChanges, chordStartBeat(pickerTarget.index));
-        renderPickerResults(generateVoicings(opts), opts.keyFifths, mode);
+        opts.keyFifths = keyFifths;
+        renderPickerResults(generateVoicings(opts), keyFifths, mode);
     }
 
     // Cached so the picker can re-render its already-fetched results when the Roman-numeral
@@ -565,6 +588,42 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
     let lastPickerKeyFifths = 0;
     let lastPickerMode = 'major';
 
+    // Which chord groups (see groupResultsByChord()) are currently expanded, keyed the same way
+    // groupResultsByChord() keys them internally (`${pattern}|${rootPc}`) -- plan.md §49. Cleared
+    // on a genuinely new search (runPickerSearch()) or a freshly-opened dialog (openChordPicker()),
+    // but deliberately *not* cleared by the Roman-numeral-toggle re-render below, so flipping that
+    // toggle doesn't collapse whatever the user already opened.
+    const expandedGroupKeys = new Set();
+
+    // One voicing row's markup -- shared between a singleton group (rendered exactly like this,
+    // standalone) and an expanded multi-voicing group's level-2 rows (plan.md §49). Unchanged from
+    // the pre-§49 single-level template.
+    function voicingRowHtml(r, keyFifths, mode, showRoman) {
+        const qualityName = (CHORD_PATTERNS[r.pattern] && CHORD_PATTERNS[r.pattern].name) || r.pattern;
+        const romanNumeral = showRoman ? getRomanNumeral(r.rootPc, r.pattern, keyFifths, mode) : null;
+        const label = romanNumeral || `${getKeyAwarePCName(r.rootPc, keyFifths)} ${qualityName}`;
+        // r.voices is Bass/Bari/Lead/Tenor (index 0-3, matching VOICE_ORDER) -- displayed
+        // Tenor-first to match the score table's own column order.
+        const notesDisplay = [3, 2, 1, 0].map(i => voiceDisplayString(r.voices[i])).join(' / ');
+        const tentativeNote = r.tentative
+            ? '<div class="picker-result-tentative">Not yet vetted by ear — may need adjustment</div>' : '';
+        return `<div class="picker-result">
+            <div>
+                <div>${escapeHtml(label)} — ${escapeHtml(r.description)}</div>
+                <div class="picker-result-notes">${escapeHtml(notesDisplay)}</div>
+                ${tentativeNote}
+            </div>
+            <button class="picker-result-revoice-btn" title="Swap parts or bump a part an octave before committing this candidate">🔀 Revoice</button>
+        </div>`;
+    }
+
+    // Groups the flat, already rankScore-sorted search results into one row per distinct chord
+    // identity (plan.md §49) -- a single-voicing group renders exactly like the old flat list; a
+    // multi-voicing group renders as a collapsible header (chord name + count) whose expanded body
+    // shows the top PICKER_SUBRESULT_CAP voicings, with 🔀 Revoice as the way to reach the rest.
+    // `PICKER_RESULT_CAP` now caps distinct *chords*, not individual voicing rows -- a real
+    // improvement, not just a rename: previously one chord with 40 arrangements could burn through
+    // most of the cap by itself.
     function renderPickerResults(results, keyFifths = 0, mode = 'major') {
         lastPickerResults = results;
         lastPickerKeyFifths = keyFifths;
@@ -574,11 +633,12 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
             pickerResultsEl.innerHTML = '';
             return;
         }
-        const shown = results.slice(0, PICKER_RESULT_CAP);
+        const groups = groupResultsByChord(results);
+        const shownGroups = groups.slice(0, PICKER_RESULT_CAP);
         showPickerStatus(
-            results.length > PICKER_RESULT_CAP
-                ? `Showing first ${PICKER_RESULT_CAP} of ${results.length} matches — narrow your search for more precise results.`
-                : `${results.length} match${results.length === 1 ? '' : 'es'}.`,
+            groups.length > PICKER_RESULT_CAP
+                ? `Showing first ${PICKER_RESULT_CAP} of ${groups.length} chords — narrow your search for more precise results.`
+                : `${groups.length} chord${groups.length === 1 ? '' : 's'} match${groups.length === 1 ? 'es' : ''}.`,
             false
         );
 
@@ -587,35 +647,56 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
         // showed the letter name regardless of the toggle. Same fallback-to-letter-name policy as
         // render() itself for a quality with no Roman-numeral convention in this app's vocabulary.
         const showRoman = showRomanNumeralsEl.checked;
-        pickerResultsEl.innerHTML = shown.map(r => {
-            const qualityName = (CHORD_PATTERNS[r.pattern] && CHORD_PATTERNS[r.pattern].name) || r.pattern;
-            const romanNumeral = showRoman ? getRomanNumeral(r.rootPc, r.pattern, keyFifths, mode) : null;
-            const label = romanNumeral || `${getKeyAwarePCName(r.rootPc, keyFifths)} ${qualityName}`;
-            // r.voices is Bass/Bari/Lead/Tenor (index 0-3, matching VOICE_ORDER) -- displayed
-            // Tenor-first to match the score table's own column order.
-            const notesDisplay = [3, 2, 1, 0].map(i => voiceDisplayString(r.voices[i])).join(' / ');
-            const tentativeNote = r.tentative
-                ? '<div class="picker-result-tentative">Not yet vetted by ear — may need adjustment</div>' : '';
-            return `<div class="picker-result">
-                <div>
-                    <div>${escapeHtml(label)} — ${escapeHtml(r.description)}</div>
-                    <div class="picker-result-notes">${escapeHtml(notesDisplay)}</div>
-                    ${tentativeNote}
-                </div>
-                <button class="picker-result-revoice-btn" data-revoice-idx="${shown.indexOf(r)}" title="Swap parts or bump a part an octave before committing this candidate">🔀 Revoice</button>
-            </div>`;
-        }).join('');
 
+        // Built in lockstep with the HTML so the click-wiring below can index straight into it,
+        // the same shape the old flat `shown` array had -- a voicing row's position in this array
+        // always matches its position among the DOM's .picker-result elements, whether it came
+        // from a singleton group or an expanded multi-voicing group's level-2 list.
+        const renderedVoicings = [];
+        const html = shownGroups.map(group => {
+            if (group.voicings.length === 1) {
+                renderedVoicings.push(group.voicings[0]);
+                return voicingRowHtml(group.voicings[0], keyFifths, mode, showRoman);
+            }
+            const groupKey = `${group.pattern}|${group.rootPc}`;
+            const qualityName = (CHORD_PATTERNS[group.pattern] && CHORD_PATTERNS[group.pattern].name) || group.pattern;
+            const romanNumeral = showRoman ? getRomanNumeral(group.rootPc, group.pattern, keyFifths, mode) : null;
+            const label = romanNumeral || `${getKeyAwarePCName(group.rootPc, keyFifths)} ${qualityName}`;
+            const expanded = expandedGroupKeys.has(groupKey);
+            let body = '';
+            if (expanded) {
+                const shownVoicings = group.voicings.slice(0, PICKER_SUBRESULT_CAP);
+                shownVoicings.forEach(r => renderedVoicings.push(r));
+                const more = group.voicings.length > PICKER_SUBRESULT_CAP
+                    ? `<div class="picker-group-more">Showing top ${PICKER_SUBRESULT_CAP} of ${group.voicings.length} — try 🔀 Revoice on any of these to reach others.</div>`
+                    : '';
+                body = `<div class="picker-group-voicings">${shownVoicings.map(r => voicingRowHtml(r, keyFifths, mode, showRoman)).join('')}${more}</div>`;
+            }
+            return `<div class="picker-group-header" data-group-key="${escapeHtml(groupKey)}">
+                <span>${expanded ? '▾' : '▸'} ${escapeHtml(label)}</span>
+                <span class="picker-group-count">${group.voicings.length} voicings</span>
+            </div>${body}`;
+        }).join('');
+        pickerResultsEl.innerHTML = html;
+
+        pickerResultsEl.querySelectorAll('.picker-group-header').forEach(el => {
+            el.addEventListener('click', () => {
+                const key = el.dataset.groupKey;
+                if (expandedGroupKeys.has(key)) expandedGroupKeys.delete(key);
+                else expandedGroupKeys.add(key);
+                renderPickerResults(lastPickerResults, lastPickerKeyFifths, lastPickerMode);
+            });
+        });
         pickerResultsEl.querySelectorAll('.picker-result').forEach((el, i) => {
-            el.addEventListener('click', () => commitPickerResult(shown[i]));
+            el.addEventListener('click', () => commitPickerResult(renderedVoicings[i]));
         });
         // Revoice button lives inside the same clickable row (plan.md §17) -- stopPropagation so
         // clicking it opens the revoice dialog instead of immediately committing the un-revoiced
         // candidate underneath it.
-        pickerResultsEl.querySelectorAll('.picker-result-revoice-btn').forEach(btn => {
+        pickerResultsEl.querySelectorAll('.picker-result-revoice-btn').forEach((btn, i) => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                openScoreRevoiceDialog(shown[parseInt(btn.dataset.revoiceIdx, 10)]);
+                openScoreRevoiceDialog(renderedVoicings[i]);
             });
         });
     }

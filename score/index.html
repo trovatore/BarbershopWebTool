@@ -55,6 +55,13 @@
         .picker-result-notes { color: #666; font-size: 0.8rem; }
         .picker-result-tentative { color: #a15c00; font-size: 0.75rem; }
         .picker-result-revoice-btn { font-size: 0.7rem; padding: 2px 6px; font-weight: normal; margin-left: 8px; flex-shrink: 0; }
+        .picker-group-header { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; border-bottom: 1px solid #f0f0f0; cursor: pointer; font-size: 0.85rem; background: #fafbfc; }
+        .picker-group-header:hover { background: #f5f6f8; }
+        .picker-group-count { color: #666; font-size: 0.75rem; flex-shrink: 0; }
+        .picker-group-voicings { border-bottom: 1px solid #f0f0f0; }
+        .picker-group-voicings .picker-result { padding-left: 22px; border-bottom: 1px solid #f7f7f7; }
+        .picker-group-voicings .picker-result:last-child { border-bottom: none; }
+        .picker-group-more { color: #666; font-size: 0.75rem; padding: 4px 10px 6px 22px; }
         #scoreRevoiceOverlay { z-index: 101; }
         #revoiceNotation { background: #fff; border: 1px solid #e1e4e8; border-radius: 8px; align-self: center; }
         .revoice-octave-col { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 0.8rem; color: #555; background: #f8f9fa; border-radius: 8px; padding: 8px 12px; }
@@ -147,7 +154,7 @@
         </div>
         <div class="row" style="font-size: 0.85rem;">
             <label for="pickerNameInput">Chord name:</label>
-            <input type="text" id="pickerNameInput" placeholder="e.g. Cm7" style="width: 90px;">
+            <input type="text" id="pickerNameInput" placeholder="e.g. Cm7 or ii7" style="width: 90px;" title="A letter name (Cm7, F#7, Bbmaj7) or a Roman numeral against this chord's own key (ii7, V7, bVI)">
             <label for="pickerBeatsInput">Beats:</label>
             <input type="number" id="pickerBeatsInput" value="1" min="0.25" step="0.25" style="width: 55px;">
             <button id="pickerSearchBtn">Search</button>

@@ -8,7 +8,7 @@
 import { STR_TO_ACC, getAbsSemitone, getVariations } from './spelling.js';
 import { CHORD_PATTERNS, countChromaticPitchClasses, ROLE_MAP } from './theory.js';
 
-export const SERIAL = "#002";
+export const SERIAL = "#003";
 
 // Chord-name suffix -> CHORD_PATTERNS key. Root letter + accidental is parsed separately
 // (parseChordName below); this table only has to cover what's left over. Case matters where it
@@ -449,6 +449,35 @@ export function generateVoicings(opts = {}) {
 
     results.sort((a, b) => a.rankScore - b.rankScore);
     return results;
+}
+
+// Groups a rankScore-sorted flat result list (generateVoicings()'s own return shape) into one row
+// per distinct chord identity -- pattern+rootPc, e.g. "F minor" or "G dominant 7th" (plan.md §49,
+// Mike's ask 2026-08-22: search results should present as chord-first, voicing-second, with the
+// individual voicings a drill-down rather than all flattened together). Deliberately a pure
+// post-processing pass over the existing search output, not a change to the search itself --
+// generateVoicings()/generateVoicingsWithFixedNotes() are untouched, so every existing test of
+// their own output (20.x/23.x/25.x/29.x) still holds exactly as before. A group's own `voicings`
+// stays in the same already-best-first order the flat list was already sorted in; first-occurrence
+// order for the groups themselves is therefore also already best-first, no separate re-sort
+// needed. This is also why §23's explicit call to keep the major triad's "close" and "2:3:4:5
+// ringing" templates separate (real distinct harmonic significance, not just different octaves of
+// the same shape) is automatically honored, not overridden -- they share one pattern+rootPc, so
+// they land in the same group as two distinct level-2 entries, never merged into one.
+export function groupResultsByChord(results) {
+    const groups = [];
+    const byKey = new Map();
+    for (const r of results) {
+        const key = `${r.pattern}|${r.rootPc}`;
+        let group = byKey.get(key);
+        if (!group) {
+            group = { pattern: r.pattern, rootPc: r.rootPc, voicings: [] };
+            byKey.set(key, group);
+            groups.push(group);
+        }
+        group.voicings.push(r);
+    }
+    return groups;
 }
 
 // Spells low-to-high so each voice's false-relation check (getVariations' own existingNotes
