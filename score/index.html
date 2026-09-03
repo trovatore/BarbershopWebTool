@@ -20,6 +20,7 @@
         .strip-btn { padding: 3px 9px; font-size: 0.75rem; border-radius: 4px; font-weight: normal; }
         .strip-nav-link { margin-left: auto; color: #007bff; text-decoration: none; }
         .strip-nav-link:hover { text-decoration: underline; }
+        .strip-nav-link + .strip-nav-link { margin-left: 12px; }
         #resumeBanner { background: #eef3ff; padding: 8px 10px; border-radius: 6px; font-size: 0.85rem; }
         #resumeBannerText { color: #333; }
         #summary { font-size: 0.9rem; color: #333; margin-bottom: 10px; }
@@ -41,6 +42,8 @@
         .cents-note { white-space: nowrap; }
         tr.measure-row td { background: #f5f6f8; color: #888; font-size: 0.75rem; font-weight: bold; padding: 3px 8px; border-bottom: 1px solid #e1e4e8; }
         tr.key-callout-row td { background: #eef3ff; color: #2a4d8f; font-size: 0.8rem; font-weight: bold; padding: 5px 8px; border-bottom: 1px solid #d3ddf5; border-top: 1px solid #d3ddf5; }
+        tr.passage-panel-row td { background: #fbf8ee; font-size: 0.8rem; padding: 8px; border-bottom: 1px solid #e9dfc0; }
+        tr.passage-panel-row label { margin-right: 10px; color: #555; }
         .row-action-btn { font-size: 0.7rem; padding: 2px 6px; font-weight: normal; margin-left: 4px; }
         .mode-toggle-btn { font-weight: normal; color: #2a4d8f; border-color: #b8c9ef; }
         .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 100; }
@@ -78,6 +81,7 @@
         <button id="redoBtn" class="strip-btn" disabled title="Redo (Ctrl+Shift+Z)">↷ Redo</button>
         <button id="newScoreBtn" class="strip-btn" title="Start a new, empty score">+ New score</button>
         <a href="../" class="strip-nav-link">← Chord page</a>
+        <a href="../settings/" class="strip-nav-link">Settings →</a>
     </div>
     <div class="row" id="resumeBanner" style="display: none;">
         <span id="resumeBannerText"></span>
@@ -95,10 +99,7 @@
             <option value="pythagorean">Pythagorean</option>
             <option value="equal">Equal</option>
         </select>
-        <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
-            <input type="checkbox" id="retuneRootless"> Allow rootless 9ths
-        </label>
-        <button id="retuneBtn" disabled title="Recomputes cents for every chord using the offline theory engine — overwrites any existing cents, including manual ones">Re-tune All</button>
+        <button id="retuneBtn" disabled title="Recomputes cents for every chord using the offline theory engine, resolving each chord's own active tuning pin automatically (plan.md §61/§64) — overwrites any existing cents, including manual ones (rootless 9ths setting comes from Settings)">Re-tune All</button>
     </div>
     <div class="row" style="font-size: 0.85rem; flex-wrap: wrap;">
         <label for="scoreBpm">Tempo: <input type="number" id="scoreBpm" value="120" min="20" max="300" style="width: 55px;"> BPM</label>

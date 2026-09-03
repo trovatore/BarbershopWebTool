@@ -1,7 +1,7 @@
-/* theory.js Serial: #006 */
+/* theory.js Serial: #007 */
 import { getAbsSemitone, ACC_TO_STR } from './spelling.js';
 
-export const SERIAL = "#006";
+export const SERIAL = "#007";
 
 // Exported (plan.md §10.9) so voicing-generator.js's chord-name parser and voicing templates
 // reuse this exact table instead of restating it -- same "don't let two tables drift apart"
@@ -60,6 +60,12 @@ export function analyzeChord(notes, options = {}) {
     // output byte-identical, same "new option defaults to old behavior" convention keyFifths itself
     // used when it was added.
     const mode = options.mode || 'major';
+    // Which voice reads 0 cents (plan.md §29, Mike's ask, 2026-08-23) -- 'root' (this function's
+    // only behavior until now), or a specific voice ('bass'/'bari'/'lead'/'tenor'), regardless of
+    // which chord tone that voice happens to be singing. Defaults to 'lead', a real, deliberate
+    // change from the previous implicit root-pin, not just a new option with an old-behavior
+    // default (barbershop convention usually locks onto the lead, not the root).
+    const pin = options.pin || 'lead';
     
     // idx is each note's position in the *original* notes array (Bass/Bari/Lead/Tenor, index
     // 0-3) -- threaded through every stage below so the final notes[].part label stays correct
@@ -153,7 +159,20 @@ export function analyzeChord(notes, options = {}) {
     const rootPitch = virtualRootMode ? (tuningRootPC + 4) % 12 : rootPC;
     const rootRoleObj = voiceRoles.find(v => (v.semi % 12) === rootPitch);
     const rootOffset = rootRoleObj ? rootRoleObj.rawOffset : 0.0;
-    
+
+    // Redirects the same subtraction above to whichever voice is the chosen pin, instead of
+    // always the root -- 'root' keeps today's exact behavior (rootOffset, matched by pitch class,
+    // wherever the root is actually voiced); a specific part looks up by .idx, which already
+    // survives resting-voice gaps correctly (see the pObjs mapping's own comment above). Falls
+    // back to rootOffset -- the same value an unmatched root already fell back to -- when the
+    // requested voice isn't present at all (e.g. pin="tenor" on a 3-voice chord).
+    let pinOffset = rootOffset;
+    if (pin !== 'root') {
+        const pinIdx = ['bass', 'bari', 'lead', 'tenor'].indexOf(pin);
+        const pinVoice = voiceRoles.find(v => v.idx === pinIdx);
+        if (pinVoice) pinOffset = pinVoice.rawOffset;
+    }
+
     return {
         common_name: (tuningStyle === 'just' && !virtualRootMode && !bestMatch.name.includes("triad")) ?
                       getKeyAwarePCName(rootPC, keyFifths) + " " + bestMatch.name.toLowerCase() :
@@ -164,7 +183,7 @@ export function analyzeChord(notes, options = {}) {
             part: ["Bass", "Bari", "Lead", "Tenor"][v.idx],
             note: v.name,
             role: v.role,
-            tuning: tuningStyle === "equal" ? 0.0 : Math.round((v.rawOffset - rootOffset) * 10) / 10
+            tuning: tuningStyle === "equal" ? 0.0 : Math.round((v.rawOffset - pinOffset) * 10) / 10
         })),
         roman_numeral: romanNumeral,
     };

@@ -1,8 +1,9 @@
-/* state.js Serial: #013 */
+/* state.js Serial: #016 */
 import { STR_TO_ACC, ACC_TO_STR } from './spelling.js';
 import { readScoreDocument, writeScoreDocument, SCORE_STORAGE_KEY } from './score-store.js';
 import { readChordDocument, writeChordDocument, CHORD_STORAGE_KEY } from './chord-store.js';
 import { createDocumentStore } from './document-store.js';
+import { readSettingsDocument, writeSettingsDocument, applyPersistedSettings, extractPersistedSettings } from './settings-store.js';
 // theory.js only imports from spelling.js, never from state.js, so this direction is safe --
 // no circular dependency (plan.md §33).
 import { keyFifthsAtBeat } from './theory.js';
@@ -71,6 +72,17 @@ export const AUDIO_DEFAULTS = {
     }
 };
 
+// Same "single source of truth" reasoning as AUDIO_DEFAULTS above, split out separately (plan.md
+// §38) so score.js/settings.js can build their own defaults-shaped settings object without
+// hand-copying these per-part literals a third time. `mute` deliberately isn't part of this --
+// it's not a default worth having, only ever a live, session-only false.
+export const PART_SETTINGS_DEFAULTS = [
+    { name: 'Bass', f4: 3500, f5: 4500, ping: 0.0, tilt: 0.0, volume: 1.0 },
+    { name: 'Bari', f4: 3500, f5: 4500, ping: 0.0, tilt: 0.0, volume: 1.0 },
+    { name: 'Lead', f4: 3500, f5: 4500, ping: 0.0, tilt: 0.0, volume: 1.0 },
+    { name: 'Tenor', f4: 3500, f5: 4500, ping: 0.0, tilt: 0.0, volume: 1.0 }
+];
+
 export const appState = {
     chords: [{
         voices: [
@@ -96,8 +108,6 @@ export const appState = {
         selectedIdx: 2,
         focusedElementId: null,
         analysisId: 0,
-        offlineMode: false,
-        rootless: false,
         // Set when this tab was opened from a Score row (plan.md §10.2) via ?sid=<chord id>.
         // null means "editing the global default" — see the §8 Q2 labeling this drives.
         editingScoreChordId: null,
@@ -107,10 +117,30 @@ export const appState = {
         // §33) -- 0 when not editing a Score chord (the standalone Chord page has no key concept
         // at all), resolved once at ?sid= load time and threaded into every note-spelling/
         // grandstaff call in main.js from here.
-        scoreChordKeyFifths: 0
+        scoreChordKeyFifths: 0,
+        // The tuning pin active at this chord's position *before* considering anything this tab
+        // itself might edit (plan.md §61/§64) -- resolved once at ?sid= load time, same treatment
+        // as scoreChordKeyFifths immediately above. null when not editing a Score chord, or when
+        // nothing was ever declared earlier in the score. Used as the "(inherit)" fallback when
+        // this chord's own tuningPin field is unset.
+        scoreChordActivePin: null
     },
     settings: {
         intonation: 'just',
+        // Which voice reads 0 cents in just/Pythagorean tuning (plan.md §29) -- 'lead' by default
+        // (barbershop convention, not the chord root), same "global setting" treatment intonation
+        // itself already has. Deliberately NOT persisted by settings-store.js (plan.md §38) --
+        // Mike's own framing: he wants to hear the effect of a pin change right now, not carry a
+        // set-once default forward, and eventually wants it changeable mid-score (plan.md §61).
+        tuningPin: 'lead',
+        // Whether to interpret an eligible chord as a rootless 9th (plan.md §38) -- promoted here
+        // from appState.ui, and now the single value every naming/tuning call site in this app
+        // consults (main.js and score.js alike), closing a real inconsistency: /score used to have
+        // its own independent copy of this same choice (score.js's now-removed #retuneRootless).
+        rootless: false,
+        // Offline (client-side theory.js) vs. online (/analyze) analysis (plan.md §38) -- promoted
+        // from appState.ui alongside rootless, same reasoning (a mode choice, not per-session UI).
+        offlineMode: false,
         vps: AUDIO_DEFAULTS.vps,
         duration: 5,
         volume: AUDIO_DEFAULTS.volume,
@@ -119,14 +149,33 @@ export const appState = {
         // in place (appState.settings.audio[key] = ...), which would silently corrupt
         // AUDIO_DEFAULTS itself if this were the same object.
         audio: { ...AUDIO_DEFAULTS.audio },
-        partSettings: [
-            { name: 'Bass', f4: 3500, f5: 4500, ping: 0.0, tilt: 0.0, volume: 1.0, mute: false },
-            { name: 'Bari', f4: 3500, f5: 4500, ping: 0.0, tilt: 0.0, volume: 1.0, mute: false },
-            { name: 'Lead', f4: 3500, f5: 4500, ping: 0.0, tilt: 0.0, volume: 1.0, mute: false },
-            { name: 'Tenor', f4: 3500, f5: 4500, ping: 0.0, tilt: 0.0, volume: 1.0, mute: false }
-        ]
+        partSettings: PART_SETTINGS_DEFAULTS.map(p => ({ ...p, mute: false }))
     }
 };
+
+// Global settings persist silently across sessions (plan.md §38) -- unlike chord:current/
+// score:current (documents, where silent resume was the actual bug being fixed, §16/§38.1), app
+// *preferences* carrying forward with no banner is the normal, expected behavior every settings
+// page has. Applied once here, at module load, before any UI/URL-param logic runs -- a ?t=/?pin=/
+// ?vps=/?a= permalink param still overrides it further down in loadStateFromURL(), same precedence
+// permalinks already had over the hardcoded default.
+applyPersistedSettings(appState.settings, readSettingsDocument());
+
+/** Resolves the *active* tuning pin up to and including chords[uptoIdx] (plan.md §61/§64) --
+ * scan-backward-for-the-nearest-preceding-declaration, the same convention pillarChord's
+ * activePillarText already uses in score.js's render(). Shared here (not duplicated in score.js
+ * too) since both the standalone Chord page's ?sid= editing and /score itself need the identical
+ * resolution. null means "nothing ever declared" -- callers should pass that straight through to
+ * analyzeChord()'s own pin option and let its `options.pin || 'lead'` default apply, rather than
+ * hardcoding 'lead' a second time.
+ */
+export function resolveActiveTuningPin(chords, uptoIdx) {
+    let active = null;
+    for (let i = 0; i <= uptoIdx && i < chords.length; i++) {
+        if (chords[i].tuningPin) active = chords[i].tuningPin;
+    }
+    return active;
+}
 
 export function getNoteString(obj) {
     if (!obj || !obj.step || obj.rest) return "";
@@ -137,16 +186,29 @@ export function syncInputsToState() {
     const chord = appState.chords[appState.activeChordIndex];
 
     const rToggle = document.getElementById('rootlessToggle');
-    if (rToggle) appState.ui.rootless = rToggle.checked;
+    if (rToggle) appState.settings.rootless = rToggle.checked;
 
     const oToggle = document.getElementById('offlineToggle');
-    if (oToggle) appState.ui.offlineMode = oToggle.checked;
+    if (oToggle) appState.settings.offlineMode = oToggle.checked;
 
     const vToggle = document.getElementById('legacyVocalToggle');
     if (vToggle) appState.settings.presetVersion = vToggle.checked ? 'legacy' : 'ear';
 
     const intRad = document.querySelector('input[name="intonation"]:checked');
     if (intRad) appState.settings.intonation = intRad.value;
+
+    // Editing a live Score chord (plan.md §61/§64): the radios declare/clear *this chord's own*
+    // pin override, not the unrelated global default -- '' (the "(inherit)" option, only shown in
+    // this mode) clears the declaration back to null, matching every other "blank means inherit"
+    // field in this app (pillarChord, a resting voice, etc.).
+    const pinRad = document.querySelector('input[name="tuningPin"]:checked');
+    if (pinRad) {
+        if (appState.ui.editingScoreChordId) {
+            chord.tuningPin = pinRad.value || null;
+        } else {
+            appState.settings.tuningPin = pinRad.value;
+        }
+    }
 
     const vowRad = document.querySelector('input[name="vowel"]:checked');
     if (vowRad) chord.vowel = vowRad.value;
@@ -202,16 +264,25 @@ export function syncStateToInputs() {
     const chord = appState.chords[appState.activeChordIndex];
 
     const rToggle = document.getElementById('rootlessToggle');
-    if (rToggle) rToggle.checked = appState.ui.rootless;
+    if (rToggle) rToggle.checked = appState.settings.rootless;
 
     const oToggle = document.getElementById('offlineToggle');
-    if (oToggle) oToggle.checked = appState.ui.offlineMode;
+    if (oToggle) oToggle.checked = appState.settings.offlineMode;
 
     const vToggle = document.getElementById('legacyVocalToggle');
     if (vToggle) vToggle.checked = (appState.settings.presetVersion === 'legacy');
 
     const intRad = document.querySelector(`input[name="intonation"][value="${appState.settings.intonation}"]`);
     if (intRad) intRad.checked = true;
+
+    // Mirrors syncInputsToState()'s own branch above: a live Score chord shows *its own* declared
+    // pin (or '' / "(inherit)" if it hasn't declared one), never the unrelated global default.
+    const pinValue = appState.ui.editingScoreChordId ? (chord.tuningPin || '') : appState.settings.tuningPin;
+    const pinRad = document.querySelector(`input[name="tuningPin"][value="${pinValue}"]`);
+    if (pinRad) pinRad.checked = true;
+    document.querySelectorAll('.tuning-pin-inherit-opt').forEach(el => {
+        el.style.display = appState.ui.editingScoreChordId ? '' : 'none';
+    });
 
     const vowRad = document.querySelector(`input[name="vowel"][value="${chord.vowel}"]`);
     if (vowRad) vowRad.checked = true;
@@ -269,14 +340,26 @@ export function syncStateToInputs() {
         const mEl = document.getElementById(`part-mute-${i}`);
         if (mEl) mEl.classList.toggle('active', part.mute);
     });
+
+    // Write-through (plan.md §38): called after every settings mutation reaches appState (every
+    // relevant handler in main.js calls this function, directly or via renderUI(), regardless of
+    // which specific field changed) -- same "every edit writes through" discipline
+    // chord:current/score:current already use, just without their undo/dirty layer (settings-store.js
+    // has none, v1 has no explicit save/load for a baseline to mean anything against). Runs on
+    // every render, including plain chord edits that touch no setting at all -- a harmless
+    // redundant write, the same cost profile already accepted elsewhere in this codebase.
+    writeSettingsDocument(extractPersistedSettings(appState.settings));
 }
 
 /**
- * Returns false only for a truly first-ever bare visit -- no ?sid=, no ?n=, and nothing in
- * chord:current to resume -- so main.js knows whether it's safe to bless the freshly-computed
- * default chord as "not dirty" once the initial analysis pass settles (establishFreshChordBaseline()
- * below). Every other case returns true, since a real document (resumed, imported, or a live Score
- * chord) already has its own legitimate dirty state that must NOT be silently overwritten.
+ * Returns false for a bare visit -- no ?sid=, no ?n= -- so main.js knows it's safe to bless the
+ * freshly-computed default chord as "not dirty" once the initial analysis pass settles
+ * (establishFreshChordBaseline() below). This is true whether or not chord:current has something
+ * to resume (plan.md §38.1): a bare visit no longer silently resumes it here at all -- main.js's
+ * init() offers a dismissible banner instead, and the default chord showing underneath it until
+ * Resume is clicked is exactly as "fresh" as a genuinely first-ever visit. Every other case
+ * returns true, since a real document (imported, or a live Score chord) already has its own
+ * legitimate dirty state that must NOT be silently overwritten.
  */
 export function loadStateFromURL() {
     const params = new URLSearchParams(window.location.search);
@@ -306,6 +389,11 @@ export function loadStateFromURL() {
             let pos = 0;
             for (let i = 0; i < idx; i++) pos += doc.chords[i].beats;
             appState.ui.scoreChordKeyFifths = keyFifthsAtBeat(keyChanges, pos);
+            // Same one-time-resolution treatment as scoreChordKeyFifths immediately above (plan.md
+            // §61/§64) -- excludes idx itself, since this chord's *own* tuningPin field (already
+            // carried through by the direct doc.chords[idx] assignment above) is what "inherit"
+            // falls back to, not something included in its own resolution.
+            appState.ui.scoreChordActivePin = resolveActiveTuningPin(doc.chords, idx - 1);
         } else {
             appState.ui.editingScoreChordId = sid;
             appState.ui.scoreChordNotFound = true;
@@ -321,7 +409,7 @@ export function loadStateFromURL() {
     // before a destructive replace is enough, undo-of-import isn't needed on top of that).
     if (params.has('n') && isChordDocumentDirty() &&
         !window.confirm('This link would replace your current unsaved chord. Load it anyway and discard your changes?')) {
-        resumeStandaloneDocument();
+        applyStandaloneDocument();
         syncStateToInputs();
         return true;
     }
@@ -342,6 +430,7 @@ export function loadStateFromURL() {
         chord.tuning = params.get('c').split(',').map(val => parseFloat(val) || 0);
     }
     if (params.has('t')) appState.settings.intonation = params.get('t');
+    if (params.has('pin')) appState.settings.tuningPin = params.get('pin');
     if (params.has('v')) {
         chord.vowel = params.get('v');
         const presets = appState.settings.presetVersion === 'legacy' ? VOWEL_PRESETS_LEGACY : VOWEL_PRESETS_EAR;
@@ -376,14 +465,27 @@ export function loadStateFromURL() {
         return true;
     }
 
-    // Bare visit, no link -- resume the persisted standalone document if this browser has one
-    // (survives refresh, plan.md §10.7.1) instead of always resetting to the hardcoded default.
-    const resumed = resumeStandaloneDocument();
+    // Bare visit, no link -- plan.md §38.1: this used to resume chord:current silently right here.
+    // Now it doesn't -- main.js's init() checks hasStandaloneDocumentToResume() itself and shows a
+    // dismissible banner instead (mirroring /score's own #resumeBanner, §16), only calling
+    // applyStandaloneDocument() from that banner's own Resume click. Nothing was resumed at this
+    // point either way, so this always returns false -- establishFreshChordBaseline() correctly
+    // treats the still-showing default chord as fresh until the user actually clicks Resume.
     syncStateToInputs();
-    return resumed;
+    return false;
 }
 
-function resumeStandaloneDocument() {
+/** Read-only check for whether there's a chord:current to offer resuming -- used by main.js's
+ * init() to decide whether to show the resume banner, without actually applying anything. */
+export function hasStandaloneDocumentToResume() {
+    const doc = readChordDocument();
+    return !!(doc && doc.chord);
+}
+
+/** Actually applies the persisted chord:current into appState -- called from the resume banner's
+ * own Resume click (main.js), or from loadStateFromURL()'s confirm-decline branch above, where an
+ * incoming ?n= link was declined and the existing document needs to be put back as-is. */
+export function applyStandaloneDocument() {
     const doc = readChordDocument();
     if (doc && doc.chord) {
         appState.chords[0] = doc.chord;
@@ -473,6 +575,7 @@ export function generatePermalink() {
     p.set('n', chord.voices.map(s => getNoteString(s)).join(','));
     p.set('c', chord.tuning.join(','));
     p.set('t', appState.settings.intonation);
+    p.set('pin', appState.settings.tuningPin);
     p.set('v', chord.vowel);
     p.set('vps', appState.settings.vps);
 

@@ -1,4 +1,4 @@
-<!-- index.html Serial: #63 -->
+<!-- index.html Serial: #64 -->
 <!DOCTYPE html>
 <html>
 <head>
@@ -40,6 +40,9 @@
         .strip-btn:disabled { opacity: 0.4; cursor: default; }
         .strip-nav-link { margin-left: auto; color: #007bff; text-decoration: none; }
         .strip-nav-link:hover { text-decoration: underline; }
+        .strip-nav-link + .strip-nav-link { margin-left: 12px; }
+        #resumeBanner { background: #eef3ff; padding: 8px 10px; border-radius: 6px; font-size: 0.85rem; display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+        #resumeBannerText { color: #333; }
 
         .play-btn { background: #28a745; color: white; border: none; padding: 10px 20px; border-radius: 8px; font-size: 1rem; display: flex; align-items: center; gap: 8px; transition: background 0.2s; cursor: pointer; }
         .play-btn:hover { background: #218838; }
@@ -84,6 +87,12 @@
         <button id="undoBtn" class="strip-btn" title="Undo (Ctrl+Z)">↶ Undo</button>
         <button id="redoBtn" class="strip-btn" title="Redo (Ctrl+Shift+Z)">↷ Redo</button>
         <a href="score/" class="strip-nav-link">Score page →</a>
+        <a href="settings/" class="strip-nav-link">Settings →</a>
+    </div>
+    <div id="resumeBanner" style="display: none;">
+        <span id="resumeBannerText"></span>
+        <button id="resumeBtn" class="strip-btn">Resume</button>
+        <button id="dismissResumeBtn" class="strip-btn">Dismiss</button>
     </div>
     <div id="notation-container"><div id="notation"></div></div>
     <div class="controls"></div>
@@ -114,6 +123,19 @@
                 <label class="selector-opt"><input type="radio" name="intonation" value="just" checked> Just</label>
                 <label class="selector-opt"><input type="radio" name="intonation" value="pythagorean"> Pyth.</label>
                 <label class="selector-opt"><input type="radio" name="intonation" value="custom"> Custom</label>
+            </div>
+            <div class="intonation-selector" title="Which voice reads 0 cents (plan.md §29) -- barbershop convention usually locks onto the lead, not the root">
+                <span class="section-label">Pin to:</span>
+                <!-- Only shown while editing a live Score chord (plan.md §61/§64) -- toggled via
+                     state.js's syncStateToInputs(). Clears this chord's own pin declaration back
+                     to inheriting from earlier in the score; meaningless on the standalone page,
+                     which has no earlier-in-a-score concept at all, so it's hidden there. -->
+                <label class="selector-opt tuning-pin-inherit-opt" style="display: none;"><input type="radio" name="tuningPin" value=""> (inherit)</label>
+                <label class="selector-opt"><input type="radio" name="tuningPin" value="root"> Root</label>
+                <label class="selector-opt"><input type="radio" name="tuningPin" value="bass"> Bass</label>
+                <label class="selector-opt"><input type="radio" name="tuningPin" value="bari"> Bari</label>
+                <label class="selector-opt"><input type="radio" name="tuningPin" value="lead" checked> Lead</label>
+                <label class="selector-opt"><input type="radio" name="tuningPin" value="tenor"> Tenor</label>
             </div>
         </div>
         <div class="vowel-selector">

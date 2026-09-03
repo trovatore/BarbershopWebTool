@@ -1,5 +1,5 @@
-/* Service Worker for Offline Mode Serial: #004 */
-const CACHE_NAME = 'barbershop-calculator-v4';
+/* Service Worker for Offline Mode Serial: #005 */
+const CACHE_NAME = 'barbershop-calculator-v5';
 // Paths are relative to this script's own URL (always the site root), not origin-absolute --
 // origin-absolute paths would resolve to the wrong place under a GitHub Pages project subpath
 // (e.g. https://user.github.io/repo/).
@@ -8,6 +8,7 @@ const ASSETS = [
   'help/',
   'analysis/',
   'score/',
+  'settings/',
   'static/js/main.js',
   'static/js/state.js',
   'static/js/theory.js',
@@ -17,6 +18,12 @@ const ASSETS = [
   'static/js/ui-controls.js',
   'static/js/score.js',
   'static/js/score-store.js',
+  'static/js/chord-store.js',
+  'static/js/document-store.js',
+  'static/js/settings-store.js',
+  'static/js/settings.js',
+  'static/js/revoice.js',
+  'static/js/voicing-generator.js',
   'engine/barbershop-engine.js',
   'https://cdn.jsdelivr.net/npm/vexflow@4.2.2/build/cjs/vexflow.js',
   'https://cdn.jsdelivr.net/npm/chart.js',

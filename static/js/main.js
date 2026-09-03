@@ -1,15 +1,15 @@
-/* main.js Serial: #067-STABLE */
+/* main.js Serial: #070-STABLE */
 import { getAbsSemitone, getVariations, STR_TO_ACC, STEP_TO_SEMI, SERIAL as S_SPEL } from './spelling.js';
 import { renderControls, handleGlobalKey, SERIAL as S_UI } from './ui-controls.js';
 import { drawChord, SERIAL as S_NOT } from './notation.js';
 import { playChord, saveChordAsWav, analyzeAndShow, primeAudioContext, SERIAL as S_AUD } from './audio.js';
 import { analyzeChord, getRomanNumeral, SERIAL as S_THY } from './theory.js';
-import { appState, syncInputsToState, syncStateToInputs, loadStateFromURL, generatePermalink, getNoteString, syncChordToScoreDocument, syncChordToStandaloneDocument, isScoreDocumentDirty, isChordDocumentDirty, establishFreshChordBaseline, chordDocStore, VOWEL_PRESETS_LEGACY, VOWEL_PRESETS_EAR } from './state.js';
+import { appState, syncInputsToState, syncStateToInputs, loadStateFromURL, generatePermalink, getNoteString, syncChordToScoreDocument, syncChordToStandaloneDocument, isScoreDocumentDirty, isChordDocumentDirty, establishFreshChordBaseline, chordDocStore, hasStandaloneDocumentToResume, applyStandaloneDocument, VOWEL_PRESETS_LEGACY, VOWEL_PRESETS_EAR } from './state.js';
 import { createDocumentStore } from './document-store.js';
 import { readChordDocument } from './chord-store.js';
 import { swapVoices, bumpOctave, SWAP_PAIRS, VOICE_LABELS } from './revoice.js';
 
-const S_IDX = "#067-STABLE";
+const S_IDX = "#070-STABLE";
 const SHOW_SERIALS = false;
 
 // True only until the very first, page-load-triggered analysis pass settles (cleared at the end
@@ -35,29 +35,33 @@ function activeUndoStore() {
     return appState.ui.editingScoreChordId ? chordUndoStore : chordDocStore;
 }
 
-// The snapshot bundles the chord together with settings.intonation, even though intonation is a
-// global setting, not a chord field -- because updateAnalysisResult() overwrites chord.tuning
-// off of whatever intonation currently is, any time it isn't 'custom'. Snapshotting the chord
-// alone would let a later triggerMutation() (including the one undo/redo() themselves call, to
-// refresh chord.analysis for the restored notes) immediately re-fetch analysis and re-clobber
-// the just-restored tuning with fresh values for whatever intonation is *currently* selected --
-// caught live in a real browser: switching to "Just" then Ctrl+Z left the custom cents undone
-// only for an instant before the undo's own re-analysis silently wrote them right back over.
-// Other global settings (rootless, offline, audio/vibrato prefs, part volume/mute) don't have
-// this problem -- they don't gate whether chord.tuning gets overwritten -- so they stay out of
-// scope, along with continuous drag inputs (f1/f2/f3, vibrato sliders, part dials), which fire on
-// every 'input' tick and don't go through triggerMutation()/sync to score:current today either
-// (a pre-existing gap, not something this pass changes).
+// The snapshot bundles the chord together with settings.intonation and settings.tuningPin, even
+// though both are global settings, not chord fields -- because updateAnalysisResult() overwrites
+// chord.tuning off of whatever intonation/pin currently are, any time intonation isn't 'custom'.
+// Snapshotting the chord alone would let a later triggerMutation() (including the one undo/redo()
+// themselves call, to refresh chord.analysis for the restored notes) immediately re-fetch analysis
+// and re-clobber the just-restored tuning with fresh values for whatever intonation/pin are
+// *currently* selected -- caught live in a real browser: switching to "Just" then Ctrl+Z left the
+// custom cents undone only for an instant before the undo's own re-analysis silently wrote them
+// right back over. tuningPin (plan.md §29) gates the exact same overwrite, so it inherits the same
+// fix rather than reopening the identical bug for a second setting. Other global settings
+// (rootless, offline, audio/vibrato prefs, part volume/mute) don't have this problem -- they don't
+// gate whether chord.tuning gets overwritten -- so they stay out of scope, along with continuous
+// drag inputs (f1/f2/f3, vibrato sliders, part dials), which fire on every 'input' tick and don't
+// go through triggerMutation()/sync to score:current today either (a pre-existing gap, not
+// something this pass changes).
 function undoRedoContent() {
     return {
         chord: appState.chords[appState.activeChordIndex],
         intonation: appState.settings.intonation,
+        tuningPin: appState.settings.tuningPin,
     };
 }
 
 function applyUndoRedoContent(snap) {
     appState.chords[appState.activeChordIndex] = snap.chord;
     appState.settings.intonation = snap.intonation;
+    appState.settings.tuningPin = snap.tuningPin;
 }
 
 // Call as the first thing inside any handler that's about to mutate the active chord's own
@@ -113,11 +117,19 @@ async function fetchAnalysis() {
     // hand-traced: keyFifths=0 reproduces the reported "II7" for a chord whose real answer, in
     // G major, is "V7").
     const keyFifths = appState.ui.scoreChordKeyFifths;
+    // plan.md §61/§64: editing a live Score chord resolves *this chord's own* declared pin
+    // (falling back to whatever was active earlier in the score if it hasn't declared one, per
+    // scoreChordActivePin's own one-time resolution at ?sid= load) -- appState.settings.tuningPin
+    // (the old global default) only applies on the standalone page.
+    const pin = appState.ui.editingScoreChordId
+        ? (chord.tuningPin || appState.ui.scoreChordActivePin || undefined)
+        : appState.settings.tuningPin;
 
-    if (appState.ui.offlineMode) {
+    if (appState.settings.offlineMode) {
         const data = analyzeChord(noteStrs, {
-            allow_rootless: appState.ui.rootless,
+            allow_rootless: appState.settings.rootless,
             tuning_style: appState.settings.intonation,
+            pin,
             keyFifths
         });
         updateAnalysisResult(data, chord);
@@ -134,8 +146,9 @@ async function fetchAnalysis() {
             method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
                 notes: noteStrs,
-                allow_rootless: appState.ui.rootless,
-                tuning_style: appState.settings.intonation
+                allow_rootless: appState.settings.rootless,
+                tuning_style: appState.settings.intonation,
+                pin,
             })
         });
         const data = await res.json();
@@ -143,8 +156,9 @@ async function fetchAnalysis() {
             // The backend's own response never has this field (see comment above) -- overlay the
             // client-side theory engine's roman_numeral on top of it, everything else untouched.
             data.roman_numeral = analyzeChord(noteStrs, {
-                allow_rootless: appState.ui.rootless,
+                allow_rootless: appState.settings.rootless,
                 tuning_style: appState.settings.intonation,
+                pin,
                 keyFifths
             }).roman_numeral;
             updateAnalysisResult(data, chord);
@@ -153,8 +167,9 @@ async function fetchAnalysis() {
         console.error('Falling back to client-side analysis (no /analyze backend reachable):', e);
         if (currentId === appState.ui.analysisId) {
             const data = analyzeChord(noteStrs, {
-                allow_rootless: appState.ui.rootless,
+                allow_rootless: appState.settings.rootless,
                 tuning_style: appState.settings.intonation,
+                pin,
                 keyFifths
             });
             updateAnalysisResult(data, chord);
@@ -470,6 +485,23 @@ function applyRevoiceDialog() {
     triggerMutation(true);
 }
 
+// Resume banner (plan.md §38.1): a bare visit to `/` no longer silently loads chord:current --
+// offers it via a dismissible banner instead, mirroring /score's own #resumeBanner (§16, the same
+// fix already applied there for the identical reason). Nothing here touches appState until Resume
+// is actually clicked.
+function hideResumeBanner() {
+    const el = document.getElementById('resumeBanner');
+    if (el) el.style.display = 'none';
+}
+
+function showResumeBanner() {
+    const doc = readChordDocument();
+    const textEl = document.getElementById('resumeBannerText');
+    const bannerEl = document.getElementById('resumeBanner');
+    if (textEl) textEl.textContent = `Resume "${(doc && doc.sourceLabel) || 'previous chord'}"?`;
+    if (bannerEl) bannerEl.style.display = 'flex';
+}
+
 function init() {
     const resumedExistingDocument = loadStateFromURL();
     syncStateToInputs();
@@ -478,6 +510,20 @@ function init() {
         const el = document.getElementById(id);
         if (el) el[evt] = fn;
     };
+
+    // A genuinely bare visit (loadStateFromURL() only returns false for that case now) with
+    // something in chord:current to offer -- everything else (?sid=, ?n=, or nothing persisted at
+    // all) has already either loaded its own real content or has nothing to resume.
+    if (!resumedExistingDocument && hasStandaloneDocumentToResume()) {
+        showResumeBanner();
+    }
+    safeListen('resumeBtn', 'onclick', () => {
+        applyStandaloneDocument();
+        hideResumeBanner();
+        renderUI();
+        fetchAnalysis();
+    });
+    safeListen('dismissResumeBtn', 'onclick', hideResumeBanner);
 
     safeListen('rootlessToggle', 'onchange', triggerMutation);
     safeListen('offlineToggle', 'onchange', triggerMutation);
@@ -513,6 +559,13 @@ function init() {
     // custom cents," even though the mutation that actually changes tuning hasn't happened yet
     // at the point this handler runs.
     document.querySelectorAll('input[name="intonation"]').forEach(r => r.onchange = () => {
+        pushChordUndo();
+        triggerMutation();
+    });
+
+    // Same reasoning as intonation directly above -- tuningPin (plan.md §29) also gates whether
+    // chord.tuning gets overwritten, so it needs the same undo-snapshot-before-mutating treatment.
+    document.querySelectorAll('input[name="tuningPin"]').forEach(r => r.onchange = () => {
         pushChordUndo();
         triggerMutation();
     });

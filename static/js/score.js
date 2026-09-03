@@ -5,7 +5,8 @@
    "preview without committing" state anymore. */
 import { STR_TO_ACC, ACC_TO_STR, getAbsSemitone } from './spelling.js';
 import { writeScoreDocument, readScoreDocument, newChordId, SCORE_STORAGE_KEY } from './score-store.js';
-import { VOWEL_PRESETS_EAR, getNoteString, AUDIO_DEFAULTS } from './state.js';
+import { VOWEL_PRESETS_EAR, getNoteString, AUDIO_DEFAULTS, PART_SETTINGS_DEFAULTS, resolveActiveTuningPin } from './state.js';
+import { readSettingsDocument, applyPersistedSettings } from './settings-store.js';
 import { createDocumentStore } from './document-store.js';
 import { analyzeChord, CHORD_PATTERNS, getKeyAwarePCName, getKeyName, getRomanNumeral, keyFifthsAtBeat, keyModeAtBeat, parseRomanNumeral, chordPitchClasses, checkPillarConsistency } from './theory.js';
 import { playScore, stopScorePlayback, saveScoreAsWav, primeAudioContext } from './audio.js';
@@ -19,13 +20,47 @@ import { drawChord } from './notation.js';
 // the user is still choosing a file / looking over the loaded score, well before they click Play.
 window.addEventListener('pointerdown', primeAudioContext, { once: true, capture: true });
 
-// Fixed vibrato/formant-Q/vps/volume defaults for whole-score playback -- /score has no
-// equivalent UI for these (plan.md §10.5 only asked for tempo + the 4-part mix + mute, not a full
-// audio-settings panel here too), so it needs a stable, independent snapshot rather than reading
-// live appState.settings from the Chord page (which could reflect a one-off customization made
-// there). Derived from state.js's own AUDIO_DEFAULTS (plan.md §37) instead of a hand-copied
-// literal, so there's one place left to edit when a default changes.
-const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps, volume: AUDIO_DEFAULTS.volume };
+// Global settings, read fresh every time they're needed (plan.md §38) -- until now /score had no
+// UI or persisted access to any of this at all (§35's original complaint) and used a frozen,
+// independent hardcoded snapshot instead ("must not reflect a one-off customization someone made
+// on the Chord page" -- the right call when there was no real shared/persisted home for these
+// values, no longer true now that settings-store.js exists). Builds a defaults-shaped object from
+// state.js's own AUDIO_DEFAULTS/PART_SETTINGS_DEFAULTS (plan.md §37/§38, one place to edit a
+// hardcoded default) and overlays whatever's actually in settings:current via the same
+// applyPersistedSettings() merge state.js/settings.js both use -- so a change made on /settings
+// (or /) takes effect here on next use, not just on next full page load. rootless (plan.md §38's
+// consolidation) also comes from here now instead of its own removed, independent
+// #retuneRootless checkbox.
+// Floating-point beat-position comparison tolerance -- shared across render()'s measure/key-change
+// walk and the passage-panel/KeyChange-upsert logic below (plan.md §61/§64), which needs the exact
+// same "close enough to be the same beat" test render() already established.
+const EPS = 1e-6;
+
+function currentGlobalSettings() {
+    const settings = {
+        vps: AUDIO_DEFAULTS.vps,
+        volume: AUDIO_DEFAULTS.volume,
+        rootless: false,
+        audio: { ...AUDIO_DEFAULTS.audio },
+        partSettings: PART_SETTINGS_DEFAULTS.map(p => ({ ...p })),
+    };
+    applyPersistedSettings(settings, readSettingsDocument());
+    // Flattened on the way out -- applyPersistedSettings() needs .audio nested to merge into (its
+    // contract, shared with state.js/settings.js), but playScore()/saveScoreAsWav()'s
+    // setupAudioGraph()/createVoice() read the 8 vibrato/phase/formant-Q params as top-level
+    // opts.X (phaseJitter, q1, etc.), the same flat shape main.js's own getAudioSettings() already
+    // produces -- nesting them under .audio here left every one of those undefined, silently
+    // NaN-ing frequency/timing math (setupAudioGraph()'s `Math.random() * opts.phaseJitter`, etc.)
+    // and producing dead silence on Play / a "non-finite" AudioParam crash on Save .wav. Caught
+    // live by Mike, not either test suite (no test exercises real WebAudio scheduling).
+    return {
+        vps: settings.vps,
+        volume: settings.volume,
+        rootless: settings.rootless,
+        partSettings: settings.partSettings,
+        ...settings.audio,
+    };
+}
 
 (function () {
     const engine = window["barbershop-engine"];
@@ -35,7 +70,6 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
     const exportBtn = document.getElementById('exportBtn');
     const retuneBtn = document.getElementById('retuneBtn');
     const retuneIntonationEl = document.getElementById('retuneIntonation');
-    const retuneRootlessEl = document.getElementById('retuneRootless');
     // Page-local display preference (plan.md §34) -- not persisted to score:current, same
     // treatment as the playback mixer's "for listening only, not saved with the score" sliders.
     const showRomanNumeralsEl = document.getElementById('showRomanNumerals');
@@ -173,6 +207,11 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
     let currentXml = null;
     let currentResult = null;
     let currentDoc = null; // set as soon as a file is chosen; has stable chord ids
+    // Which measure's passage-settings panel (plan.md §61/§64) is open, identified by that
+    // measure's own start beat -- null means none. Beat, not an index, since it has to survive
+    // render() re-running (which it does, every commit) without going stale the way a row-position
+    // index could if the chord count ever changed out from under it.
+    let openPassagePanelBeat = null;
 
     // Bass/Bari/Lead/Tenor — matches state.js's existing voice-index convention (settings.
     // partSettings, per-voice tuning, etc. are all keyed by this same order), not the
@@ -228,6 +267,9 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
             // §40.3), or null -- re-parsed against the locally active key wherever it's needed,
             // never pre-resolved here.
             pillarChord: c.pillarChord || null,
+            // Raw pin name newly declared at this chord (plan.md §61/§64), or null -- same
+            // scan-backward-for-active convention as pillarChord immediately above.
+            tuningPin: c.tuningPin || null,
             volumePerPart: [1, 1, 1, 1],
             // Computed once at import (plan.md §10.9), not left null -- render() needs a name
             // source that stays correctly *positioned* even after a chord's inserted/removed
@@ -237,7 +279,7 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
             // stale after a *live* edit to this same chord's own notes, same as before (a real
             // analysis pass only runs at import/insert/replace time, not on every edit) --
             // unchanged, deliberate limitation, not something this fixes or was meant to.
-            analysis: analyzeChord(voices.map(v => voiceDisplayString(v)), { tuning_style: 'just', keyFifths, mode }),
+            analysis: analyzeChord(voices.map(v => voiceDisplayString(v)), { tuning_style: 'just', keyFifths, mode, allow_rootless: currentGlobalSettings().rootless }),
         };
     }
 
@@ -300,7 +342,6 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
         // silently disagree with what export actually produces once a picker edit changed the
         // total beat count.
         const boundaries = meta.measureBoundariesBeats;
-        const EPS = 1e-6;
         let boundaryIdx = 0;
         let pos = 0;
         // The *active* pillar chord for each row (plan.md §40.3) -- "stays in effect until a new
@@ -327,7 +368,14 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
                 keyChangeIdx++;
             }
             while (boundaryIdx < boundaries.length - 1 && pos >= boundaries[boundaryIdx] - EPS) {
-                rows.push(`<tr class="measure-row"><td colspan="10">Measure ${boundaryIdx + 1}</td></tr>`);
+                const measureBeat = boundaries[boundaryIdx];
+                rows.push(`<tr class="measure-row"><td colspan="10">Measure ${boundaryIdx + 1}
+                    <button class="row-action-btn passage-toggle-btn" data-passage-beat="${measureBeat}"
+                        title="Change key signature, mode, or tuning pin starting at this measure (plan.md §61/§64)">⚙ Passage settings</button>
+                </td></tr>`);
+                if (openPassagePanelBeat !== null && Math.abs(openPassagePanelBeat - measureBeat) < EPS) {
+                    rows.push(renderPassagePanel(measureBeat));
+                }
                 boundaryIdx++;
             }
             const tenor = appendCents(voiceDisplayString(docChord.voices[3]), docChord.tuning[3]);
@@ -806,7 +854,15 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
         // pickerTarget is still valid at commit time and this is cheap.
         const keyFifths = keyFifthsAtBeat(currentDoc.metadata.keyChanges, chordStartBeat(pickerTarget.index));
         const mode = keyModeAtBeat(currentDoc.metadata.keyChanges, chordStartBeat(pickerTarget.index));
-        const analysis = analyzeChord(noteStrs, { tuning_style: 'just', keyFifths, mode });
+        // Same "preserve on replace" treatment as pillarChord immediately below (plan.md §61/§64)
+        // -- if the slot being replaced had its own pin declaration, the new voicing keeps it;
+        // otherwise (insert/append, or replace of an undeclared slot) fall back to whatever's
+        // active from earlier in the score, same scan-backward resolveActiveTuningPin() uses
+        // everywhere else.
+        const preservedTuningPin = pickerTarget.mode === 'replace'
+            ? (currentDoc.chords[pickerTarget.index].tuningPin || null) : null;
+        const activePinForTuning = preservedTuningPin || resolveActiveTuningPin(currentDoc.chords, pickerTarget.index - 1);
+        const analysis = analyzeChord(noteStrs, { tuning_style: 'just', keyFifths, mode, allow_rootless: currentGlobalSettings().rootless, pin: activePinForTuning || undefined });
         // Every template round-trips through analyzeChord() at every root (js-tests.html group
         // 20) -- this fallback exists so a future template that doesn't would degrade to equal
         // temperament rather than crash, not because it's expected to trigger.
@@ -830,6 +886,7 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
             // to inherit from, so they start with none, same as any other new chord.
             pillarChord: pickerTarget.mode === 'replace'
                 ? (currentDoc.chords[pickerTarget.index].pillarChord || null) : null,
+            tuningPin: preservedTuningPin,
             volumePerPart: [1, 1, 1, 1],
             analysis,
         };
@@ -927,14 +984,64 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
         renderPickerResults(generateVoicings({ pattern, rootPc, fixed, keyFifths }), keyFifths, mode);
     });
 
+    // Inserts a new KeyChange at exactly `atBeat`, or overwrites one already there (a measure
+    // boundary may already have an import-derived entry) -- keyChanges must stay sorted by atBeat
+    // for keyFifthsAtBeat/keyModeAtBeat's own scan to work.
+    function upsertKeyChange(keyChanges, atBeat, keyFifths, mode) {
+        const idx = keyChanges.findIndex(kc => Math.abs(kc.atBeat - atBeat) < EPS);
+        if (idx !== -1) {
+            keyChanges[idx] = { atBeat, keyFifths, mode };
+        } else {
+            keyChanges.push({ atBeat, keyFifths, mode });
+            keyChanges.sort((a, b) => a.atBeat - b.atBeat);
+        }
+    }
+
+    // Shared whole-score recompute (plan.md §61/§64) -- walks every chord once, resolving each
+    // one's own active key/mode/pin (a chord's *own* resolved values, not the newly-changed ones
+    // universally, so a "whole score" pass is actually safe/correct, not just simple: an earlier
+    // chord governed by an earlier declaration keeps resolving to that declaration, unaffected by
+    // a later one changing). Refreshes .analysis (name/Roman numeral) unconditionally, matching
+    // the already-established commitModeToggle/retuneBtn pattern; .tuning (cents) only when
+    // `retune` is set, since a key/mode-only change has no reason to touch cents at all. Used by
+    // commitModeToggle, the passage panel's Apply, and retuneBtn -- one implementation, not three.
+    function recomputeScoreAnalysis(doc, tuningStyle, { retune = false } = {}) {
+        const meta = doc.metadata;
+        let pos = 0;
+        let activePin = null;
+        let retuned = 0, skipped = 0;
+        doc.chords.forEach(chord => {
+            if (chord.tuningPin) activePin = chord.tuningPin;
+            const kf = keyFifthsAtBeat(meta.keyChanges, pos);
+            const md = keyModeAtBeat(meta.keyChanges, pos);
+            const noteStrs = chord.voices.map(v => voiceDisplayString(v));
+            const analysis = analyzeChord(noteStrs, {
+                tuning_style: tuningStyle, keyFifths: kf, mode: md,
+                allow_rootless: currentGlobalSettings().rootless,
+                pin: activePin || undefined,
+            });
+            chord.analysis = analysis;
+            if (retune) {
+                if (analysis.notes && analysis.notes.length === chord.voices.length) {
+                    chord.tuning = analysis.notes.map(n => n.tuning);
+                    retuned++;
+                } else {
+                    skipped++;
+                }
+            }
+            pos += chord.beats;
+        });
+        return { retuned, skipped };
+    }
+
     // Mode-toggle button on a key callout row (plan.md §46): switches that key segment between
     // major and its relative minor. Important gotcha this handler exists specifically to avoid --
     // docChord.analysis (carrying .roman_numeral) is cached at chord-creation time, not recomputed
     // live in render() (see toStateChord's own comment); a naive "just flip kc.mode and render()"
     // handler would leave every affected row's Roman numeral stale, silently defeating the whole
-    // point of the button. So this walks every chord and recomputes .analysis fresh, mirroring
-    // retuneBtn's own "walk every chord, recompute one derived field, leave everything else alone"
-    // pattern rather than a new segment-scoped partial recompute.
+    // point of the button. recomputeScoreAnalysis() (plan.md §61/§64, generalized from this
+    // handler's own original inline loop) does the "walk every chord, recompute .analysis, leave
+    // .tuning alone" work -- a mode-only change has no reason to touch cents.
     function commitModeToggle(keyChangeIdx) {
         if (!currentDoc) return;
         const kc = currentDoc.metadata.keyChanges[keyChangeIdx];
@@ -942,14 +1049,7 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
         const newMode = (kc.mode || 'major') === 'minor' ? 'major' : 'minor';
         pushDocUndo();
         kc.mode = newMode;
-        let pos = 0;
-        currentDoc.chords.forEach(chord => {
-            const kf = keyFifthsAtBeat(currentDoc.metadata.keyChanges, pos);
-            const md = keyModeAtBeat(currentDoc.metadata.keyChanges, pos);
-            const noteStrs = chord.voices.map(v => voiceDisplayString(v));
-            chord.analysis = analyzeChord(noteStrs, { tuning_style: 'just', keyFifths: kf, mode: md });
-            pos += chord.beats;
-        });
+        recomputeScoreAnalysis(currentDoc, 'just');
         currentDoc.updatedAt = Date.now();
         writeScoreDocument(currentDoc);
         updateDocStrip();
@@ -960,6 +1060,123 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
     chordsEl.addEventListener('click', (e) => {
         const btn = e.target.closest('button.mode-toggle-btn');
         if (btn && currentDoc) commitModeToggle(parseInt(btn.dataset.keyChangeIdx, 10));
+    });
+
+    // Passage-settings panel (plan.md §61/§64): Mike's own unified framing of key signature, mode,
+    // and tuning pin as one concept -- "passages," not per-chord settings -- with one UI, rather
+    // than three separate controls. Measure-boundary only, mirroring §64's own agreed restriction.
+    // The first chord *at* this measure's own start beat is where a new pin declaration lands
+    // (mirrors pillarChord's per-chord field exactly); a measure with zero chords in it (the very
+    // last, trailing boundary) has no such chord, so pin editing is silently unavailable there --
+    // key/mode can still change since those live on metadata, not a chord.
+    function firstChordAtBeat(beat) {
+        let pos = 0;
+        for (let i = 0; i < currentDoc.chords.length; i++) {
+            if (Math.abs(pos - beat) < EPS) return i;
+            pos += currentDoc.chords[i].beats;
+        }
+        return -1;
+    }
+
+    function renderPassagePanel(measureBeat) {
+        const meta = currentDoc.metadata;
+        const kf = keyFifthsAtBeat(meta.keyChanges, measureBeat);
+        const md = keyModeAtBeat(meta.keyChanges, measureBeat);
+        const firstChordIdx = firstChordAtBeat(measureBeat);
+        const activePin = firstChordIdx >= 0 ? resolveActiveTuningPin(currentDoc.chords, firstChordIdx) : null;
+        const fifthsOptions = [];
+        for (let f = -7; f <= 7; f++) {
+            fifthsOptions.push(`<option value="${f}" ${f === kf ? 'selected' : ''}>${f} (${escapeHtml(getKeyName(f, md))})</option>`);
+        }
+        const pinChoices = ['', 'root', 'bass', 'bari', 'lead', 'tenor'];
+        const pinOptions = pinChoices.map(p =>
+            `<option value="${p}" ${p === (activePin || '') ? 'selected' : ''}>${p === '' ? '(inherit)' : p.charAt(0).toUpperCase() + p.slice(1)}</option>`
+        ).join('');
+        return `<tr class="passage-panel-row" data-passage-beat="${measureBeat}" data-passage-idx="${firstChordIdx}">
+            <td colspan="10">
+                <label>Key: <select class="passage-fifths">${fifthsOptions.join('')}</select></label>
+                <label>Mode: <select class="passage-mode">
+                    <option value="major" ${md === 'major' ? 'selected' : ''}>Major</option>
+                    <option value="minor" ${md === 'minor' ? 'selected' : ''}>Minor</option>
+                </select></label>
+                <label title="${firstChordIdx < 0 ? 'No chord starts this measure yet -- add one first' : 'Which voice reads 0 cents from here forward'}">Pin:
+                    <select class="passage-pin" ${firstChordIdx < 0 ? 'disabled' : ''}>${pinOptions}</select>
+                </label>
+                <button class="row-action-btn passage-apply-btn">Apply</button>
+                <button class="row-action-btn passage-cancel-btn">Cancel</button>
+            </td>
+        </tr>`;
+    }
+
+    // Mode select changing the key-fifths select's own labels live (getKeyName()'s labels are
+    // mode-dependent) -- delegated the same way every other panel control is, no per-render
+    // re-wiring needed.
+    chordsEl.addEventListener('change', (e) => {
+        const modeSel = e.target.closest('select.passage-mode');
+        if (!modeSel) return;
+        const row = modeSel.closest('tr.passage-panel-row');
+        const fifthsSel = row.querySelector('select.passage-fifths');
+        const newMode = modeSel.value;
+        Array.from(fifthsSel.options).forEach(opt => {
+            opt.textContent = `${opt.value} (${getKeyName(parseInt(opt.value, 10), newMode)})`;
+        });
+    });
+
+    function commitPassagePanel(row) {
+        if (!currentDoc || !row) return;
+        const beat = parseFloat(row.dataset.passageBeat);
+        const firstChordIdx = parseInt(row.dataset.passageIdx, 10);
+        const newFifths = parseInt(row.querySelector('select.passage-fifths').value, 10);
+        const newMode = row.querySelector('select.passage-mode').value;
+        const newPin = row.querySelector('select.passage-pin').value || null;
+
+        const meta = currentDoc.metadata;
+        const oldFifths = keyFifthsAtBeat(meta.keyChanges, beat);
+        const oldMode = keyModeAtBeat(meta.keyChanges, beat);
+        const oldPin = firstChordIdx >= 0 ? resolveActiveTuningPin(currentDoc.chords, firstChordIdx) : null;
+        const keyChanged = newFifths !== oldFifths || newMode !== oldMode;
+        const pinChanged = firstChordIdx >= 0 && newPin !== oldPin;
+
+        if (!keyChanged && !pinChanged) {
+            openPassagePanelBeat = null;
+            render();
+            return;
+        }
+
+        pushDocUndo();
+        if (keyChanged) upsertKeyChange(meta.keyChanges, beat, newFifths, newMode);
+        if (pinChanged) currentDoc.chords[firstChordIdx].tuningPin = newPin;
+        // Immediate re-tune (Mike's own call, plan.md §61/§64) only when the pin itself actually
+        // changed -- a key/mode-only change has no reason to touch any chord's cents.
+        recomputeScoreAnalysis(currentDoc, 'just', { retune: pinChanged });
+        currentDoc.updatedAt = Date.now();
+        writeScoreDocument(currentDoc);
+        openPassagePanelBeat = null;
+        updateDocStrip();
+        updateUndoRedoButtons();
+        const parts = [];
+        if (keyChanged) parts.push(`key -> ${getKeyName(newFifths, newMode)}`);
+        if (pinChanged) parts.push(`pin -> ${newPin || '(inherit)'}`);
+        setStatus(`Passage at beat ${beat}: ${parts.join(', ')}.`);
+        render();
+    }
+
+    chordsEl.addEventListener('click', (e) => {
+        const toggleBtn = e.target.closest('button.passage-toggle-btn');
+        if (toggleBtn) {
+            const beat = parseFloat(toggleBtn.dataset.passageBeat);
+            openPassagePanelBeat = (openPassagePanelBeat !== null && Math.abs(openPassagePanelBeat - beat) < EPS)
+                ? null : beat;
+            render();
+            return;
+        }
+        if (e.target.closest('button.passage-cancel-btn')) {
+            openPassagePanelBeat = null;
+            render();
+            return;
+        }
+        const applyBtn = e.target.closest('button.passage-apply-btn');
+        if (applyBtn) commitPassagePanel(applyBtn.closest('tr.passage-panel-row'));
     });
 
     // Choosing a file both imports it and immediately commits it as the shared score:current
@@ -1077,7 +1294,7 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
         const formants = chord.formants || {};
         return new engine.barbershop.web.JsEditedChord(
             chord.beats, voices, vowel, formants.f1 || 0, formants.f2 || 0, formants.f3 || 0,
-            chord.pillarChord || null
+            chord.pillarChord || null, chord.tuningPin || null
         );
     }
 
@@ -1122,8 +1339,11 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
     // once instead of opening each one individually to trigger analysis. Uses the offline
     // theory.js engine directly (synchronous, no network round trips) rather than /analyze --
     // the same engine main.js falls back to in Offline Mode, and fast enough that even a large
-    // score needs no progress indicator. allow_rootless is one global choice for the whole run,
-    // not per-chord -- the Score data model has no place to store a per-chord override anyway.
+    // score needs no progress indicator. Rootless (plan.md §38) comes from the real global
+    // setting, not a bulk-only checkbox. Pin (plan.md §61/§64) is no longer a single bulk-wide
+    // choice either, now that it can vary within a score -- recomputeScoreAnalysis() resolves each
+    // chord's own currently-active declared pin automatically, the same shared function the
+    // passage panel's Apply and the mode-toggle button both already use.
     // Unconditionally overwrites every chord's cents, including any set by hand -- there's no
     // "custom, don't touch" flag in this data model (only the Chord-editor page's *global*
     // intonation setting has a 'custom' mode, chords here are just numbers) -- so this keeps its
@@ -1132,28 +1352,13 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
     retuneBtn.onclick = () => {
         if (!currentDoc) return;
         const tuningStyle = retuneIntonationEl.value;
-        const allowRootless = retuneRootlessEl.checked;
+        const allowRootless = currentGlobalSettings().rootless;
         const total = currentDoc.chords.length;
-        if (!window.confirm(`Recompute cents for all ${total} chords using ${retuneIntonationEl.options[retuneIntonationEl.selectedIndex].text} tuning? This overwrites any existing cents, including manual ones.`)) {
+        if (!window.confirm(`Recompute cents for all ${total} chords using ${retuneIntonationEl.options[retuneIntonationEl.selectedIndex].text} tuning, using each chord's own active tuning pin (rootless 9ths: ${allowRootless ? 'on' : 'off'}, per Settings)? This overwrites any existing cents, including manual ones.`)) {
             return;
         }
         pushDocUndo();
-
-        let retuned = 0;
-        let skipped = 0;
-        currentDoc.chords.forEach(chord => {
-            const noteStrs = chord.voices.map(v => getNoteString(v));
-            const result = analyzeChord(noteStrs, { allow_rootless: allowRootless, tuning_style: tuningStyle });
-            // An unrecognized chord (fewer than 3 real notes, or no matching pattern) comes back
-            // with notes: [] -- leave its existing cents alone rather than wiping them to nothing.
-            if (result.notes && result.notes.length === chord.voices.length) {
-                chord.tuning = result.notes.map(n => n.tuning);
-                retuned++;
-            } else {
-                skipped++;
-            }
-        });
-
+        const { retuned, skipped } = recomputeScoreAnalysis(currentDoc, tuningStyle, { retune: true });
         currentDoc.updatedAt = Date.now();
         writeScoreDocument(currentDoc);
         render();
@@ -1186,7 +1391,7 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
         scorePlaybackStatusEl.textContent = 'Starting…';
         let totalSeconds;
         try {
-            totalSeconds = await playScore(currentDoc.chords, bpm, readMixer(), SCORE_AUDIO_DEFAULTS);
+            totalSeconds = await playScore(currentDoc.chords, bpm, readMixer(), currentGlobalSettings());
         } catch (e) {
             scorePlaybackStatusEl.textContent = '';
             setStatus('Playback failed: ' + e.message, true);
@@ -1217,7 +1422,7 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
         setPlaybackButtonsEnabled(false);
         scorePlaybackStatusEl.textContent = 'Rendering .wav…';
         try {
-            await saveScoreAsWav(currentDoc.chords, bpm, readMixer(), SCORE_AUDIO_DEFAULTS);
+            await saveScoreAsWav(currentDoc.chords, bpm, readMixer(), currentGlobalSettings());
             scorePlaybackStatusEl.textContent = '';
         } catch (e) {
             scorePlaybackStatusEl.textContent = '';
@@ -1326,6 +1531,15 @@ const SCORE_AUDIO_DEFAULTS = { ...AUDIO_DEFAULTS.audio, vps: AUDIO_DEFAULTS.vps,
         if (doc) resumeDocument(doc);
     };
     dismissResumeBtn.onclick = hideResumeBanner;
+
+    // Seed the mixer sliders from the persisted per-part volume default (plan.md §38) -- one-time,
+    // page-load only. From here the mixer stays exactly what it always was: session-only, "for
+    // listening only -- not saved with the score" -- the persisted default just supplies a real
+    // starting point instead of always starting at a flat 1.0 regardless of what's set globally.
+    currentGlobalSettings().partSettings.forEach((part, i) => {
+        const el = document.getElementById(`mix-vol-${i}`);
+        if (el) el.value = part.volume;
+    });
 
     if (!WebApi) {
         setStatus('Engine bundle not loaded — run `./gradlew jsBrowserDevelopmentWebpack` in engine-kt/ first.', true);

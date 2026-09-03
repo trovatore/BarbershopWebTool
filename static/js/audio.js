@@ -1,7 +1,7 @@
 /* audio.js Serial: #021 */
 import { getAbsSemitone } from './spelling.js';
 
-export const SERIAL = "#021";
+export const SERIAL = "#024";
 
 let audioCtx = null;
 let sharedNoiseBuffer = null;
@@ -15,8 +15,24 @@ function getNoiseBuffer(ctx) {
     return sharedNoiseBuffer;
 }
 
+// Attack/release scale with this voice's own duration (capped at the original fixed values) --
+// Mike reported live that whole-score playback/Save .wav "continues with silence at the end" of
+// most chords, confirmed by decoding a real rendered .wav's actual sample data (not just reading
+// the code): a typical short score chord (e.g. a 1-beat chord at a normal tempo, floored to
+// MIN_CHORD_SECONDS=0.7s by buildScoreSchedule) spent barely 0.05s at full volume before a fixed
+// 0.5s release began -- 71% of the chord's entire ring time was an exponential decay toward
+// near-silence, not a sustained tone. The fixed 0.15s/0.5s envelope was tuned for the single-chord
+// page, where `duration` is always several seconds (§10.5.1's own comment says as much) -- fine
+// there, wrong for a real score's much shorter per-chord durations. Capping each at a fraction of
+// `duration` preserves the exact original 0.15/0.5 feel for anything long enough to not need
+// scaling (duration >= 1s for attack, >= 1.67s for release) while guaranteeing a real sustained
+// majority of any short chord's ring time instead of a near-immediate decay. Also structurally
+// guarantees attack+release < duration for any positive duration (0.15+0.3 of duration < duration),
+// though MIN_CHORD_SECONDS is left as-is -- this only fixes the envelope shape, not whether/how far
+// a too-short beat value gets floored.
 function createVoice(ctx, freq, startTime, duration, targetGain, opts) {
-    const attack = 0.15, release = 0.5;
+    const attack = Math.min(0.15, duration * 0.15);
+    const release = Math.min(0.5, duration * 0.3);
     // Defensive coding: ensure all formants have numeric fallbacks to prevent crash
     const formants = [
         opts.f1 || 500, 
@@ -219,19 +235,42 @@ const MIN_CHORD_SECONDS = 0.7;
 // render length -- which is NOT simply the last chord's end, since an earlier short chord's
 // floored ring-out can (rarely) extend past a later chord's own nominal end if several short
 // chords cluster together; take the max across every chord's own end, not just the last one.
-function buildScoreSchedule(chords, bpm) {
+//
+// Mike's own real report: a real in-progress arrangement ("Soft Kitty," only the first few
+// measures actually voiced) played for a full 96 seconds at 80 BPM even though the arranged music
+// itself is over in a few seconds -- root-caused directly against the real file, not guessed: its
+// last "chord" is a single 112-beat entry with all four voices resting (the rest of the piece's
+// nominal measure count, never arranged). setupAudioGraph() already skips a resting voice
+// outright (no oscillator/node ever gets created for one), so that trailing stretch was always
+// silent -- it just kept inflating totalSeconds (and so the exported .wav's length and the Play
+// button's own reset timer) to the score's full nominal beat count regardless of how much of it
+// is actually real, sounding content. A genuine rest in the *middle* of a real arrangement still
+// needs its full real time (subsequent chords must stay correctly placed against it) -- this only
+// trims TRAILING dead air after the last chord that has any voice actually sounding.
+// Exported for direct unit testing (plan.md §68's follow-up bug) -- pure function, no audio-graph
+// side effects, so this doesn't need the live-audio-decode technique the envelope fix above did.
+export function buildScoreSchedule(chords, bpm) {
     const secondsPerBeat = 60 / bpm;
+    let lastSoundingIdx = -1;
+    chords.forEach((chord, i) => {
+        if (chord.voices.some(v => !v.rest)) lastSoundingIdx = i;
+    });
+
     let t = 0;
     let maxEnd = 0;
-    const scheduled = chords.map(chord => {
+    let tAtLastSounding = 0;
+    const scheduled = chords.map((chord, i) => {
         const beatSeconds = chord.beats * secondsPerBeat;
         const duration = Math.max(beatSeconds, MIN_CHORD_SECONDS);
         const entry = { chord, start: t, duration };
-        maxEnd = Math.max(maxEnd, t + duration);
+        if (i <= lastSoundingIdx) {
+            maxEnd = Math.max(maxEnd, t + duration);
+            tAtLastSounding = t + beatSeconds;
+        }
         t += beatSeconds;
         return entry;
     });
-    return { scheduled, totalSeconds: Math.max(maxEnd, t) };
+    return { scheduled, totalSeconds: lastSoundingIdx === -1 ? 0 : Math.max(maxEnd, tAtLastSounding) };
 }
 
 // mixer: [{volume, mute}, ...] indexed Bass/Bari/Lead/Tenor same as everywhere else in the app --
@@ -256,7 +295,15 @@ export async function playScore(chords, bpm, mixer, baseOpts) {
     pendingChordBuilds = [];
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     await ensureRunning(audioCtx);
-    const partSettings = mixer.map(m => ({ volume: m.volume, mute: m.mute }));
+    // f4/f5/ping/tilt (plan.md §38) come from baseOpts.partSettings, if the caller supplied it --
+    // the real persisted per-part formant defaults, previously not wired into score playback at
+    // all. volume/mute always come from the live mixer regardless -- session-only by design, and
+    // must win even when baseOpts.partSettings has its own (default) volume for the same part.
+    const partSettings = mixer.map((m, i) => ({
+        ...(baseOpts.partSettings ? baseOpts.partSettings[i] : null),
+        volume: m.volume,
+        mute: m.mute,
+    }));
     const { scheduled, totalSeconds } = buildScoreSchedule(chords, bpm);
     const startAt = audioCtx.currentTime + PLAYBACK_LEAD_IN;
     scheduled.forEach(({ chord, start, duration }) => {
@@ -287,7 +334,12 @@ export function stopScorePlayback() {
 
 export async function saveScoreAsWav(chords, bpm, mixer, baseOpts) {
     const sr = 44100;
-    const partSettings = mixer.map(m => ({ volume: m.volume, mute: m.mute }));
+    // Same f4/f5/ping/tilt-from-baseOpts, volume/mute-from-mixer merge as playScore() above.
+    const partSettings = mixer.map((m, i) => ({
+        ...(baseOpts.partSettings ? baseOpts.partSettings[i] : null),
+        volume: m.volume,
+        mute: m.mute,
+    }));
     const { scheduled, totalSeconds } = buildScoreSchedule(chords, bpm);
     const offlineCtx = new OfflineAudioContext(4, Math.ceil(sr * totalSeconds), sr);
     scheduled.forEach(({ chord, start, duration }) => {
