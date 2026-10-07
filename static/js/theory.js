@@ -1,7 +1,7 @@
-/* theory.js Serial: #007 */
+/* theory.js Serial: #008 */
 import { getAbsSemitone, ACC_TO_STR } from './spelling.js';
 
-export const SERIAL = "#007";
+export const SERIAL = "#008";
 
 // Exported (plan.md §10.9) so voicing-generator.js's chord-name parser and voicing templates
 // reuse this exact table instead of restating it -- same "don't let two tables drift apart"
@@ -66,7 +66,11 @@ export function analyzeChord(notes, options = {}) {
     // change from the previous implicit root-pin, not just a new option with an old-behavior
     // default (barbershop convention usually locks onto the lead, not the root).
     const pin = options.pin || 'lead';
-    
+    // Per-chord remembered alternate reading (plan.md §58) -- 'sixth' is the only value used so
+    // far. null/omitted keeps every existing caller's output byte-identical, same convention every
+    // other option here already follows.
+    const chordReading = options.chordReading || null;
+
     // idx is each note's position in the *original* notes array (Bass/Bari/Lead/Tenor, index
     // 0-3) -- threaded through every stage below so the final notes[].part label stays correct
     // even when a rest ("–", or any other unparseable entry) gets filtered out here. Without this,
@@ -129,23 +133,49 @@ export function analyzeChord(notes, options = {}) {
     // "rootless 9th" idiom, not something Roman-numeral analysis needs to mirror.
     const romanNumeral = getRomanNumeral(rootPC, matchedPattern, keyFifths, mode);
 
+    // Whether the *default* (pre-reinterpretation) match is even eligible for the sixth-chord
+    // reading (plan.md §58) -- computed before bestMatch.name gets overwritten below, so callers
+    // (score.js's toggle UI) can tell "this chord could be read as a 6th" apart from "this chord
+    // currently IS being read as one."
+    const canReadAsSixth = bestMatch.name === "Minor seventh";
+
     let tuningRootPC = rootPC;
     let virtualRootMode = false;
+    let sixthReadingMode = false;
     if (bestMatch.name === "Half-diminished seventh" && allowRootless) {
         const virtualRoot = (rootPC - 4 + 12) % 12;
         bestMatch.name = `${getKeyAwarePCName(virtualRoot, keyFifths)} dominant 9th chord (rootless)`;
         tuningRootPC = virtualRoot;
         virtualRootMode = true;
+    } else if (canReadAsSixth && chordReading === 'sixth') {
+        // Same chord, reinterpreted: the original minor-seventh root's own minor 3rd becomes the
+        // new root (Am7's A-C-E-G read instead as C6's C-E-G-A) -- a real, remembered per-chord
+        // choice (plan.md §58), not a change to which reading wins by default anywhere else.
+        // ROLE_MAP already has a complete "Major 6th" entry (interval 9) -- recomputing every
+        // voice's role against the new root below naturally lands the *old* root there with no
+        // special-case override needed at all, unlike the rootless-ninth reinterpretation above
+        // (whose own "9th" role has no natural ROLE_MAP slot and needs one).
+        const virtualRoot = (rootPC + 3) % 12;
+        bestMatch.name = `${getKeyAwarePCName(virtualRoot, keyFifths)} major sixth chord`;
+        tuningRootPC = virtualRoot;
+        sixthReadingMode = true;
     }
 
     const lowestPC = sortedPitches[0].semi % 12;
     const relSortedPCs = uniquePCs.map(pc => (pc - rootPC + 12) % 12).sort((a, b) => a - b);
     const invIdx = relSortedPCs.indexOf((lowestPC - rootPC + 12) % 12);
-    
+
     const invNames = ["Root Position", "1st Inversion", "2nd Inversion", "3rd Inversion"];
     let invName = invNames[invIdx] || `${invIdx} Inversion`;
     if (virtualRootMode) {
         invName = invNames[(invIdx + 1) % 4] || "Inversion";
+    } else if (sixthReadingMode) {
+        // Recomputed directly against the new root, rather than deriving a second hand-computed
+        // shift constant the way virtualRootMode's own correction above does -- more robust, and
+        // leaves that already-verified rootless-ninth computation completely untouched.
+        const sixthRelSortedPCs = uniquePCs.map(pc => (pc - tuningRootPC + 12) % 12).sort((a, b) => a - b);
+        const sixthInvIdx = sixthRelSortedPCs.indexOf((lowestPC - tuningRootPC + 12) % 12);
+        invName = invNames[sixthInvIdx] || `${sixthInvIdx} Inversion`;
     }
 
     const offsets = tuningStyle === "pythagorean" ? PYTH_OFFSETS : (tuningStyle === "equal" ? {} : JUST_OFFSETS);
@@ -156,7 +186,7 @@ export function analyzeChord(notes, options = {}) {
         return { name: p.name, semi: p.semi, role: role, rawOffset: offsets[role] || 0.0, idx: p.idx };
     });
 
-    const rootPitch = virtualRootMode ? (tuningRootPC + 4) % 12 : rootPC;
+    const rootPitch = virtualRootMode ? (tuningRootPC + 4) % 12 : (sixthReadingMode ? tuningRootPC : rootPC);
     const rootRoleObj = voiceRoles.find(v => (v.semi % 12) === rootPitch);
     const rootOffset = rootRoleObj ? rootRoleObj.rawOffset : 0.0;
 
@@ -174,7 +204,7 @@ export function analyzeChord(notes, options = {}) {
     }
 
     return {
-        common_name: (tuningStyle === 'just' && !virtualRootMode && !bestMatch.name.includes("triad")) ?
+        common_name: (tuningStyle === 'just' && !virtualRootMode && !sixthReadingMode && !bestMatch.name.includes("triad")) ?
                       getKeyAwarePCName(rootPC, keyFifths) + " " + bestMatch.name.toLowerCase() :
                       (bestMatch.name.includes("triad") ? getKeyAwarePCName(rootPC, keyFifths) + "-" + bestMatch.name.toLowerCase() : bestMatch.name),
         inversion: invName,
@@ -186,6 +216,10 @@ export function analyzeChord(notes, options = {}) {
             tuning: tuningStyle === "equal" ? 0.0 : Math.round((v.rawOffset - pinOffset) * 10) / 10
         })),
         roman_numeral: romanNumeral,
+        // plan.md §58: true whenever the default (pre-reinterpretation) match could take the
+        // sixth-chord reading, regardless of whether it currently is -- score.js's row toggle
+        // uses this to decide when to show the control at all.
+        canReadAsSixth,
     };
 }
 

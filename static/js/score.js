@@ -10,7 +10,7 @@ import { readSettingsDocument, applyPersistedSettings } from './settings-store.j
 import { createDocumentStore } from './document-store.js';
 import { analyzeChord, CHORD_PATTERNS, getKeyAwarePCName, getKeyName, getRomanNumeral, keyFifthsAtBeat, keyModeAtBeat, parseRomanNumeral, chordPitchClasses, checkPillarConsistency } from './theory.js';
 import { playScore, stopScorePlayback, saveScoreAsWav, primeAudioContext } from './audio.js';
-import { parseChordName, generateVoicings, groupResultsByChord } from './voicing-generator.js';
+import { parseChordName, generateVoicings, groupResultsByChord, ALT_PATTERN_NAMES } from './voicing-generator.js';
 import { swapVoices, bumpOctave, SWAP_PAIRS, VOICE_LABELS } from './revoice.js';
 import { drawChord } from './notation.js';
 
@@ -270,6 +270,11 @@ function currentGlobalSettings() {
             // Raw pin name newly declared at this chord (plan.md §61/§64), or null -- same
             // scan-backward-for-active convention as pillarChord immediately above.
             tuningPin: c.tuningPin || null,
+            // Remembered alternate reading (plan.md §58, e.g. "sixth") -- null means the default
+            // reading. A reimported file may already have this declared; threaded into the
+            // analyzeChord() call below so a reimported "C6" displays correctly immediately, not
+            // "Am7" until some later recompute.
+            chordReading: c.chordReading || null,
             volumePerPart: [1, 1, 1, 1],
             // Computed once at import (plan.md §10.9), not left null -- render() needs a name
             // source that stays correctly *positioned* even after a chord's inserted/removed
@@ -279,7 +284,7 @@ function currentGlobalSettings() {
             // stale after a *live* edit to this same chord's own notes, same as before (a real
             // analysis pass only runs at import/insert/replace time, not on every edit) --
             // unchanged, deliberate limitation, not something this fixes or was meant to.
-            analysis: analyzeChord(voices.map(v => voiceDisplayString(v)), { tuning_style: 'just', keyFifths, mode, allow_rootless: currentGlobalSettings().rootless }),
+            analysis: analyzeChord(voices.map(v => voiceDisplayString(v)), { tuning_style: 'just', keyFifths, mode, allow_rootless: currentGlobalSettings().rootless, chordReading: c.chordReading || null }),
         };
     }
 
@@ -393,6 +398,14 @@ function currentGlobalSettings() {
             const name = docChord.analysis
                 ? (showRoman ? (docChord.analysis.roman_numeral || docChord.analysis.common_name) : docChord.analysis.common_name)
                 : '?';
+            // Remembered alternate reading (plan.md §58) -- shown only when this chord's own
+            // shape is actually ambiguous this way (canReadAsSixth reflects the *default*,
+            // pre-reinterpretation match, so the toggle still shows even while the sixth reading
+            // is the one currently active). Lands in the name cell itself rather than a new
+            // column, mirroring how compact the pillar badge already is next to its own cell.
+            const readingToggleBtn = (docChord.analysis && docChord.analysis.canReadAsSixth)
+                ? `<button class="row-action-btn reading-toggle-btn" data-idx="${i}" title="${docChord.chordReading === 'sixth' ? 'Switch back to the default reading' : 'Read as a major sixth chord instead'}">🔄</button>`
+                : '';
             const editLink = `<a href="../?sid=${encodeURIComponent(docChord.id)}" target="_blank">Edit</a>`;
             // Click-to-edit picker (plan.md §10.2's item 7): a lighter way to change just the
             // vowel without opening the full Chord editor.
@@ -428,7 +441,7 @@ function currentGlobalSettings() {
                 <button class="row-action-btn" data-picker-mode="replace" data-picker-idx="${i}" title="Replace this chord">↻ Replace</button>
                 ${voiceItBtn}`;
             rows.push(`<tr>
-                <td>${i}</td><td>${beats}</td><td>${escapeHtml(name)}</td>
+                <td>${i}</td><td>${beats}</td><td>${escapeHtml(name)}${readingToggleBtn}</td>
                 ${pillarTd}
                 ${vowelTd}
                 <td class="cents-note">${escapeHtml(tenor)}</td><td class="cents-note">${escapeHtml(lead)}</td>
@@ -647,7 +660,7 @@ function currentGlobalSettings() {
     // standalone) and an expanded multi-voicing group's level-2 rows (plan.md §49). Unchanged from
     // the pre-§49 single-level template.
     function voicingRowHtml(r, keyFifths, mode, showRoman) {
-        const qualityName = (CHORD_PATTERNS[r.pattern] && CHORD_PATTERNS[r.pattern].name) || r.pattern;
+        const qualityName = (CHORD_PATTERNS[r.pattern] && CHORD_PATTERNS[r.pattern].name) || ALT_PATTERN_NAMES[r.pattern] || r.pattern;
         const romanNumeral = showRoman ? getRomanNumeral(r.rootPc, r.pattern, keyFifths, mode) : null;
         const label = romanNumeral || `${getKeyAwarePCName(r.rootPc, keyFifths)} ${qualityName}`;
         // r.voices is Bass/Bari/Lead/Tenor (index 0-3, matching VOICE_ORDER) -- displayed
@@ -707,7 +720,7 @@ function currentGlobalSettings() {
                 return voicingRowHtml(group.voicings[0], keyFifths, mode, showRoman);
             }
             const groupKey = `${group.pattern}|${group.rootPc}`;
-            const qualityName = (CHORD_PATTERNS[group.pattern] && CHORD_PATTERNS[group.pattern].name) || group.pattern;
+            const qualityName = (CHORD_PATTERNS[group.pattern] && CHORD_PATTERNS[group.pattern].name) || ALT_PATTERN_NAMES[group.pattern] || group.pattern;
             const romanNumeral = showRoman ? getRomanNumeral(group.rootPc, group.pattern, keyFifths, mode) : null;
             const label = romanNumeral || `${getKeyAwarePCName(group.rootPc, keyFifths)} ${qualityName}`;
             const expanded = expandedGroupKeys.has(groupKey);
@@ -862,7 +875,11 @@ function currentGlobalSettings() {
         const preservedTuningPin = pickerTarget.mode === 'replace'
             ? (currentDoc.chords[pickerTarget.index].tuningPin || null) : null;
         const activePinForTuning = preservedTuningPin || resolveActiveTuningPin(currentDoc.chords, pickerTarget.index - 1);
-        const analysis = analyzeChord(noteStrs, { tuning_style: 'just', keyFifths, mode, allow_rootless: currentGlobalSettings().rootless, pin: activePinForTuning || undefined });
+        // A candidate found via its alternate pattern (e.g. "0,4,7,9", plan.md §58) declares that
+        // reading on the committed chord automatically -- searching "C6" and committing it should
+        // display as "C6" immediately, not "Am7" until some later recompute happens to touch it.
+        const chordReading = candidate.pattern === '0,4,7,9' ? 'sixth' : null;
+        const analysis = analyzeChord(noteStrs, { tuning_style: 'just', keyFifths, mode, allow_rootless: currentGlobalSettings().rootless, pin: activePinForTuning || undefined, chordReading });
         // Every template round-trips through analyzeChord() at every root (js-tests.html group
         // 20) -- this fallback exists so a future template that doesn't would degrade to equal
         // temperament rather than crash, not because it's expected to trigger.
@@ -887,6 +904,7 @@ function currentGlobalSettings() {
             pillarChord: pickerTarget.mode === 'replace'
                 ? (currentDoc.chords[pickerTarget.index].pillarChord || null) : null,
             tuningPin: preservedTuningPin,
+            chordReading,
             volumePerPart: [1, 1, 1, 1],
             analysis,
         };
@@ -962,6 +980,46 @@ function currentGlobalSettings() {
         if (e.key === 'Enter' && e.target.closest('input.pillar-input')) e.target.blur();
     });
 
+    // Remembered alternate reading toggle (plan.md §58) -- a per-chord declaration only, unlike
+    // the passage panel's pin (which flows forward until superseded), so this recomputes just this
+    // one chord, not a whole-score walk via recomputeScoreAnalysis(). Retunes this chord
+    // immediately too: the role reinterpretation genuinely changes what "correct" tuning means for
+    // the affected voice (e.g. Flat 7th's -31.2 cents vs. Major 6th's -15.6), so leaving stale
+    // cents that no longer match the newly-displayed role would be wrong, same reasoning as §61/
+    // §64's own "declaring a new pin retunes immediately."
+    function commitReadingToggle(idx) {
+        if (!currentDoc) return;
+        const chord = currentDoc.chords[idx];
+        if (!chord) return;
+        const newReading = chord.chordReading === 'sixth' ? null : 'sixth';
+        pushDocUndo();
+        chord.chordReading = newReading;
+        const noteStrs = chord.voices.map(v => voiceDisplayString(v));
+        const kf = keyFifthsAtBeat(currentDoc.metadata.keyChanges, chordStartBeat(idx));
+        const md = keyModeAtBeat(currentDoc.metadata.keyChanges, chordStartBeat(idx));
+        const pin = resolveActiveTuningPin(currentDoc.chords, idx);
+        const analysis = analyzeChord(noteStrs, {
+            tuning_style: 'just', keyFifths: kf, mode: md,
+            allow_rootless: currentGlobalSettings().rootless,
+            pin: pin || undefined,
+            chordReading: newReading,
+        });
+        chord.analysis = analysis;
+        if (analysis.notes && analysis.notes.length === chord.voices.length) {
+            chord.tuning = analysis.notes.map(n => n.tuning);
+        }
+        currentDoc.updatedAt = Date.now();
+        writeScoreDocument(currentDoc);
+        updateDocStrip();
+        updateUndoRedoButtons();
+        setStatus(`Chord ${idx}: reading ${newReading ? 'set to major sixth chord' : 'reset to default'} (retuned).`);
+        render();
+    }
+    chordsEl.addEventListener('click', (e) => {
+        const btn = e.target.closest('button.reading-toggle-btn');
+        if (btn && currentDoc) commitReadingToggle(parseInt(btn.dataset.idx, 10));
+    });
+
     // "Voice it" (plan.md §40.3): opens the same chord picker Insert/Replace already use, prefilled
     // exactly like Replace (existing non-resting voices locked as fixed), but searches the pillar's
     // own exact quality+root directly via generateVoicings() instead of round-tripping through
@@ -1019,6 +1077,7 @@ function currentGlobalSettings() {
                 tuning_style: tuningStyle, keyFifths: kf, mode: md,
                 allow_rootless: currentGlobalSettings().rootless,
                 pin: activePin || undefined,
+                chordReading: chord.chordReading || null,
             });
             chord.analysis = analysis;
             if (retune) {

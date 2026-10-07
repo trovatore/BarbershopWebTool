@@ -8,7 +8,7 @@
 import { STR_TO_ACC, getAbsSemitone, getVariations } from './spelling.js';
 import { CHORD_PATTERNS, countChromaticPitchClasses, ROLE_MAP } from './theory.js';
 
-export const SERIAL = "#003";
+export const SERIAL = "#004";
 
 // Chord-name suffix -> CHORD_PATTERNS key. Root letter + accidental is parsed separately
 // (parseChordName below); this table only has to cover what's left over. Case matters where it
@@ -23,8 +23,22 @@ const QUALITY_SUFFIXES = [
     { suffixes: ['7'], pattern: '0,4,7,10' },
     { suffixes: ['+', 'aug'], pattern: '0,4,8' },
     { suffixes: ['m', 'min', '-'], pattern: '0,3,7' },
+    // Deliberately NOT a CHORD_PATTERNS key (plan.md §58) -- the same 4 pitch classes already
+    // match "0,3,7,10" (minor seventh) from a different candidate root, and registering this
+    // pattern there would let it compete in analyzeChord()'s own root-detection loop, silently
+    // changing which name *every* existing chord of this shape gets by default. Findable by name
+    // here (and in VOICING_TEMPLATES below) without ever being an automatic/default reading --
+    // matches this feature's whole point: a real, explicit, remembered choice, not a new default.
+    { suffixes: ['6'], pattern: '0,4,7,9' },
     { suffixes: [''], pattern: '0,4,7' }, // nothing left over after the root = plain major
 ];
+
+// Display-name fallback for patterns intentionally kept out of CHORD_PATTERNS (plan.md §58) --
+// score.js's picker-result labels consult this only when CHORD_PATTERNS itself has no entry,
+// so the search UI still shows "Major sixth" instead of a bare "0,4,7,9" pattern string.
+export const ALT_PATTERN_NAMES = {
+    '0,4,7,9': 'Major sixth',
+};
 
 /** "Cm7" -> { rootStep: 'c', rootAcc: -1, pattern: '0,3,7,10' }. Returns null for anything that
     doesn't start with a real note letter or whose suffix isn't a recognized quality -- callers
@@ -109,6 +123,12 @@ export const VOICING_TEMPLATES = [
     { pattern: '0,3,6,10', description: '2nd inversion (dim5th in bass)', offsets: [-6, 0, 3, 10] },
 
     { pattern: '0,2,4,10', description: 'Root position', offsets: [0, 10, 4, 14] },
+
+    // Major sixth (plan.md §58, Mike's confirmed voicing, 2026-09-03): Bass=root, Bari=3rd,
+    // Lead=5th, Tenor=6th on top -- the same shape as this file's plain major-triad "root doubled,
+    // close" template with the 6th standing in for the doubled root. Not a CHORD_PATTERNS-matched
+    // quality (see QUALITY_SUFFIXES' own comment on why) -- only reachable by explicit name.
+    { pattern: '0,4,7,9', description: 'Root position', offsets: [0, 4, 7, 9] },
 ];
 
 // Guessed, not measured -- flagged exactly like the templates' own tentative flag, easy to
@@ -147,6 +167,11 @@ export const BARBERSHOPPINESS_RANK = {
     '0,3,6,9': 6,     // Diminished seventh
     '0,4,7,11': 7,    // Major seventh -- placeholder position, not in Mike's list
     '0,4,8': 8,       // Augmented triad -- placeholder position, not in Mike's list
+    // Major sixth (plan.md §58) -- only ever reachable by explicit name (see QUALITY_SUFFIXES'
+    // own comment), never offered during a name-less fixed-note browse, so this rank only matters
+    // relative to itself (a "C6"+fixed-note search's own results, all sharing this one pattern) --
+    // still given a real value rather than leaving it undefined/NaN in that scoring formula.
+    '0,4,7,9': 9,
 };
 
 // How many "barbershoppiness ranks" one out-of-key note costs when blending the two factors into
@@ -272,8 +297,13 @@ function generateVoicingsWithFixedNotes({ pattern, rootPc, fixed, keyFifths }) {
     const fixedByVoice = {};
     fixed.forEach(f => { fixedByVoice[f.voice] = f.semi; });
 
-    for (const patternKey of Object.keys(CHORD_PATTERNS)) {
-        if (pattern !== undefined && patternKey !== pattern) continue;
+    // An explicitly-requested pattern is searched directly, whether or not it's a CHORD_PATTERNS
+    // member (plan.md §58 -- "0,4,7,9" deliberately isn't one, see QUALITY_SUFFIXES' own comment,
+    // but a name+fixed-note combined search like "C6" with Bass fixed still needs to find it).
+    // Browsing every quality (no name given, fixed notes only) still means every *recognized*
+    // quality, unchanged.
+    const patternKeys = pattern !== undefined ? [pattern] : Object.keys(CHORD_PATTERNS);
+    for (const patternKey of patternKeys) {
         const offsets = patternKey.split(',').map(Number);
         // Whichever offset actually functions as this chord's 5th -- absent entirely for the
         // no-fifth ninth (0,2,4,10), where Bass's preference falls back to root only, a
